@@ -2,8 +2,40 @@
 name = "seedle"
 version = "0.1.0"
 edition = "2024"
-description = "Deterministic, git-friendly database seed export and load"
-license = "MIT"
+rust-version = "1.85"
+description = "Deterministic, git-friendly database seed export and load for Postgres and MySQL"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Delos-Intelligence/seedle"
+homepage = "https://github.com/Delos-Intelligence/seedle"
+documentation = "https://docs.rs/seedle"
+readme = "README.md"
+keywords = ["database", "postgres", "seed", "fixtures", "supabase"]
+categories = ["command-line-utilities", "database"]
+# Keep the published crate to the source that builds it.
+exclude = [
+    ".github/",
+    "dist/",
+    "tests/",
+]
+
+[[bin]]
+name = "seedle"
+path = "src/main.rs"
+
+# Release binaries are what most people install, so optimise them properly.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+# cargo-binstall finds prebuilt binaries from GitHub Releases instead of
+# compiling, which turns `cargo binstall seedle` into a download.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ target }.{ archive-format }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
 
 [dependencies]
 anyhow = "1"
@@ -15,6 +47,7 @@ dotenvy = "0.15"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 indexmap = { version = "2", features = ["serde"] }
 rust_decimal = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip"] }
 ryu = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
@@ -31,4 +64,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["serde"] }
 
 [dev-dependencies]
+sha2 = "0.10"
 tempfile = "3"

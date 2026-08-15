@@ -1,0 +1,166 @@
+name: release
+
+# Tag-driven: `git tag v0.1.0 && git push --tags` builds every binary, publishes
+# the crate, and updates the Homebrew tap.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (for a re-run)"
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # rustls means no OpenSSL to cross-compile, so a linker is all that is
+      # needed for the aarch64 Linux build.
+      - name: Install cross linker
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          [ -n "${{ inputs.tag }}" ] && VERSION="${{ inputs.tag }}" && VERSION="${VERSION#v}"
+          NAME="seedle-v${VERSION}-${{ matrix.target }}"
+          mkdir -p "dist/$NAME"
+          cp "target/${{ matrix.target }}/release/seedle" "dist/$NAME/"
+          cp README.md LICENSE-MIT LICENSE-APACHE "dist/$NAME/" 2>/dev/null || true
+          tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"
+          # A checksum users can verify before running the binary.
+          (cd dist && shasum -a 256 "$NAME.tar.gz" > "$NAME.tar.gz.sha256")
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          NAME="seedle-v${VERSION}-${{ matrix.target }}"
+          mkdir -p "dist/$NAME"
+          cp "target/${{ matrix.target }}/release/seedle.exe" "dist/$NAME/"
+          cp README.md "dist/$NAME/"
+          (cd dist && 7z a "$NAME.zip" "$NAME" > /dev/null)
+          (cd dist && certutil -hashfile "$NAME.zip" SHA256 | sed -n 2p > "$NAME.zip.sha256")
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+
+  crates-io:
+    name: publish to crates.io
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked
+
+  homebrew:
+    name: update the homebrew tap
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Render the formula
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sha() { cut -d' ' -f1 < "dist/seedle-v${VERSION}-$1.tar.gz.sha256"; }
+          mkdir -p out
+          sed \
+            -e "s|@VERSION@|${VERSION}|g" \
+            -e "s|@SHA_MAC_ARM@|$(sha aarch64-apple-darwin)|g" \
+            -e "s|@SHA_MAC_X86@|$(sha x86_64-apple-darwin)|g" \
+            -e "s|@SHA_LINUX_ARM@|$(sha aarch64-unknown-linux-gnu)|g" \
+            -e "s|@SHA_LINUX_X86@|$(sha x86_64-unknown-linux-gnu)|g" \
+            packaging/homebrew/seedle.rb.tmpl > out/seedle.rb
+          cat out/seedle.rb
+
+      - name: Push to the tap
+        env:
+          # A PAT with contents:write on the tap repository.
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "HOMEBREW_TAP_TOKEN is not set; skipping the tap update." >&2
+            exit 0
+          fi
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/Delos-Intelligence/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          cp out/seedle.rb tap/Formula/seedle.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/seedle.rb
+          git commit -m "seedle ${GITHUB_REF_NAME#v}" || exit 0
+          git push

@@ -13,10 +13,11 @@ use crate::db::{self, Db};
 use crate::export;
 use crate::format;
 use crate::load;
-use crate::lock::{FileEntry, Lock, drift};
+use crate::lock::{BucketEntry, FileEntry, Lock, drift};
 use crate::order;
 use crate::schema::{Schema, TableId};
 use crate::source::{self, ResolvedSource};
+use crate::storage::{self, BucketExport, StorageClient};
 
 /// Shared setup: config, resolved source, and reporting settings.
 pub struct Ctx {
@@ -216,6 +217,26 @@ pub async fn cmd_sources(ctx: &Ctx, no_connect: bool) -> Result<()> {
                             entry["error"] = serde_json::json!(format!("{e:#}"));
                         }
                     }
+                    // Storage is reported separately: a source can have a
+                    // reachable database and an unreachable storage service.
+                    if resolved.storage.is_some() {
+                        match storage_client(&resolved) {
+                            Err(e) => {
+                                entry["storage"] = serde_json::json!("unresolved");
+                                entry["storage_error"] = serde_json::json!(format!("{e:#}"));
+                            }
+                            Ok(client) => match client.ping().await {
+                                Ok(n) => {
+                                    entry["storage"] = serde_json::json!("ok");
+                                    entry["storage_buckets"] = serde_json::json!(n);
+                                }
+                                Err(e) => {
+                                    entry["storage"] = serde_json::json!("error");
+                                    entry["storage_error"] = serde_json::json!(format!("{e:#}"));
+                                }
+                            },
+                        }
+                    }
                 }
             }
         }
@@ -246,9 +267,17 @@ pub async fn cmd_sources(ctx: &Ctx, no_connect: bool) -> Result<()> {
             if r["read_only"] == serde_json::json!(true) {
                 line.push_str("  [read-only]");
             }
+            if let Some(st) = r["storage"].as_str() {
+                line.push_str(&match r["storage_buckets"].as_u64() {
+                    Some(n) => format!("  storage:{st} ({n} bucket(s))"),
+                    None => format!("  storage:{st}"),
+                });
+            }
             println!("{line}");
-            if let Some(err) = r["error"].as_str() {
-                println!("  {:width$}  {err}", "", width = width);
+            for key in ["error", "storage_error"] {
+                if let Some(err) = r[key].as_str() {
+                    println!("  {:width$}  {err}", "", width = width);
+                }
             }
             if let Some(origin) = r["origin"].as_str() {
                 ctx.detail(format!(
@@ -381,16 +410,24 @@ fn drift_json(report: &drift::Report) -> String {
 // export
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 pub async fn cmd_export(
     ctx: &Ctx,
     tables: Option<Vec<String>>,
+    buckets: Option<Vec<String>>,
+    no_buckets: bool,
     format_override: Option<crate::config::Format>,
     out_override: Option<PathBuf>,
     force: bool,
 ) -> Result<()> {
     let selected = ctx.cfg.select_tables(tables.as_deref())?;
-    if selected.is_empty() {
-        bail!("the config lists no tables, so there is nothing to export");
+    let buckets = if no_buckets {
+        Some(Vec::new())
+    } else {
+        buckets
+    };
+    if selected.is_empty() && ctx.cfg.buckets.is_empty() {
+        bail!("the config lists no tables and no buckets, so there is nothing to export");
     }
 
     let max_conns = export::concurrency(&ctx.cfg, selected.len()) as u32;
@@ -471,6 +508,10 @@ pub async fn cmd_export(
         }));
     }
 
+    // Buckets: the half of a project a SQL dump cannot capture.
+    let (bucket_entries, bucket_summary) =
+        export_buckets(ctx, &_src, &out_dir, buckets.as_deref()).await?;
+
     // A table removed from the config leaves an orphan file behind, which would
     // then load stale data forever. Remove ours, never anything else.
     let removed = crate::io::prune_stale(&out_dir, &written)?;
@@ -480,6 +521,7 @@ pub async fn cmd_export(
 
     let mut lock = Lock::build(db.engine(), &live, &order);
     lock.files = files;
+    lock.buckets = bucket_entries;
     lock.write(&lock_path)?;
 
     if ctx.json {
@@ -488,17 +530,30 @@ pub async fn cmd_export(
             serde_json::to_string_pretty(&serde_json::json!({
                 "out": out_dir.display().to_string(),
                 "tables": summary,
+                "buckets": bucket_summary,
                 "rows": total_rows,
                 "removed": removed.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
                 "fingerprint": lock.fingerprint,
             }))?
         );
     } else {
+        let objects: u64 = lock.buckets.values().map(|b| b.objects).sum();
         ctx.say(format!(
-            "exported {} table{}, {total_rows} row{} to {}",
+            "exported {} table{}, {total_rows} row{}{} to {}",
             ordered.len(),
             if ordered.len() == 1 { "" } else { "s" },
             if total_rows == 1 { "" } else { "s" },
+            if lock.buckets.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    ", {} bucket{} ({objects} object{}, {})",
+                    lock.buckets.len(),
+                    if lock.buckets.len() == 1 { "" } else { "s" },
+                    if objects == 1 { "" } else { "s" },
+                    human_bytes(lock.buckets.values().map(|b| b.bytes).sum())
+                )
+            },
             out_dir.display()
         ));
         if !removed.is_empty() {
@@ -506,6 +561,176 @@ pub async fn cmd_export(
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// buckets
+// ---------------------------------------------------------------------------
+
+/// Storage client for a source, or a clear error explaining what is missing.
+fn storage_client(src: &ResolvedSource) -> Result<StorageClient> {
+    let access = src.storage.clone().ok_or_else(|| {
+        anyhow::anyhow!(
+            "source {:?} has no `storage:` block, so its buckets cannot be reached.\n\
+             Add `storage: {{url_var: SUPABASE_URL, key_var: SUPABASE_SERVICE_ROLE_KEY}}` to it.",
+            src.name
+        )
+    })?;
+    StorageClient::new(access)
+}
+
+/// Export every selected bucket into `out_dir/buckets/<name>/`.
+async fn export_buckets(
+    ctx: &Ctx,
+    src: &ResolvedSource,
+    out_dir: &Path,
+    only: Option<&[String]>,
+) -> Result<(IndexMap<String, BucketEntry>, Vec<serde_json::Value>)> {
+    let selected = ctx.cfg.select_buckets(only)?;
+    let mut entries = IndexMap::new();
+    let mut summary = Vec::new();
+    if selected.is_empty() {
+        return Ok((entries, summary));
+    }
+
+    let client = storage_client(src)?;
+
+    for (name, cfg) in &selected {
+        let (export, blobs) = storage::export_bucket(&client, name, cfg)
+            .await
+            .with_context(|| format!("exporting bucket {name:?}"))?;
+
+        let dir = out_dir.join("buckets").join(name);
+        // Objects removed upstream must not linger locally, or a later load
+        // would put them back. Rebuilding the directory is the simplest way to
+        // guarantee the tree matches the manifest exactly.
+        if dir.join("objects").exists() {
+            std::fs::remove_dir_all(dir.join("objects"))
+                .with_context(|| format!("clearing {}", dir.join("objects").display()))?;
+        }
+        for (key, bytes) in &blobs {
+            let path = BucketExport::object_path(&dir, key)?;
+            crate::io::write_atomic(&path, bytes)?;
+        }
+        crate::io::write_atomic(&dir.join("bucket.json"), &export.settings_bytes()?)?;
+        crate::io::write_atomic(&dir.join("manifest.jsonl"), &export.manifest_bytes()?)?;
+
+        let bytes = export.total_bytes();
+        ctx.detail(format!(
+            "  bucket {name}: {} object(s), {}",
+            export.objects.len(),
+            human_bytes(bytes)
+        ));
+        summary.push(serde_json::json!({
+            "bucket": name,
+            "objects": export.objects.len(),
+            "bytes": bytes,
+        }));
+        entries.insert(
+            name.clone(),
+            BucketEntry {
+                objects: export.objects.len() as u64,
+                bytes,
+                sha256: export.hash()?,
+            },
+        );
+    }
+    Ok((entries, summary))
+}
+
+/// Upload every selected bucket back into a project.
+///
+/// Deliberately not transactional: object storage has no transaction to join.
+/// Uploads are upserts, so a re-run after a failure converges rather than
+/// duplicating, and the database load has already committed by this point.
+async fn load_buckets(
+    ctx: &Ctx,
+    src: &ResolvedSource,
+    out_dir: &Path,
+    only: Option<&[String]>,
+    dry_run: bool,
+) -> Result<Vec<serde_json::Value>> {
+    let selected = ctx.cfg.select_buckets(only)?;
+    let mut summary = Vec::new();
+    if selected.is_empty() {
+        return Ok(summary);
+    }
+
+    let client = storage_client(src)?;
+
+    for (name, _cfg) in &selected {
+        let dir = out_dir.join("buckets").join(name);
+        if !dir.is_dir() {
+            bail!(
+                "bucket {name:?} has no exported files at {} (run `seedle export` first)",
+                dir.display()
+            );
+        }
+        let export = BucketExport::read(&dir)?;
+
+        // Verify before uploading: a corrupted local file should not be pushed.
+        let mut payloads = Vec::with_capacity(export.objects.len());
+        for o in &export.objects {
+            let path = BucketExport::object_path(&dir, &o.path)?;
+            let bytes =
+                std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+            let actual = crate::lock::file_hash(&bytes);
+            if actual != o.sha256 {
+                bail!(
+                    "bucket {name:?}: {} does not match its recorded hash.\n                       manifest: {}\n  on disk:  {actual}\n                     Re-export the bucket, or restore the file.",
+                    path.display(),
+                    o.sha256
+                );
+            }
+            payloads.push((o.path.clone(), bytes, o.content_type.clone()));
+        }
+
+        if dry_run {
+            ctx.say(format!(
+                "would upload {} object(s) to bucket {name}",
+                payloads.len()
+            ));
+            summary.push(serde_json::json!({
+                "bucket": name, "objects": payloads.len(), "uploaded": 0, "dry_run": true,
+            }));
+            continue;
+        }
+
+        if client.ensure_bucket(&export.settings).await? {
+            ctx.detail(format!("  created bucket {name}"));
+        }
+        for (key, bytes, content_type) in payloads {
+            client
+                .upload(name, &key, bytes, content_type.as_deref())
+                .await?;
+        }
+        ctx.detail(format!(
+            "  bucket {name}: {} object(s) uploaded",
+            export.objects.len()
+        ));
+        summary.push(serde_json::json!({
+            "bucket": name,
+            "objects": export.objects.len(),
+            "uploaded": export.objects.len(),
+        }));
+    }
+    Ok(summary)
+}
+
+/// Byte count in the largest unit that keeps it readable.
+fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = n as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{n} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -593,9 +818,12 @@ pub async fn cmd_plan(ctx: &Ctx, tables: Option<Vec<String>>) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn cmd_load(
     ctx: &Ctx,
     tables: Option<Vec<String>>,
+    buckets: Option<Vec<String>>,
+    no_buckets: bool,
     dry_run: bool,
     no_transaction: bool,
     yes: bool,
@@ -764,6 +992,15 @@ pub async fn cmd_load(
         ctx.warn("warning: --dry-run with --no-transaction cannot undo anything; changes are live");
     }
 
+    // Buckets go after the commit: object storage has no transaction to join, so
+    // uploading earlier could leave files behind for rows that were then rolled
+    // back. Uploads are upserts, so re-running after a failure converges.
+    let bucket_summary = if no_buckets {
+        Vec::new()
+    } else {
+        load_buckets(ctx, &src, &ctx.cfg.out_dir(), buckets.as_deref(), dry_run).await?
+    };
+
     if ctx.json {
         let items: Vec<serde_json::Value> = results
             .iter()
@@ -782,6 +1019,7 @@ pub async fn cmd_load(
             serde_json::to_string_pretty(&serde_json::json!({
                 "dry_run": dry_run,
                 "tables": items,
+                "buckets": bucket_summary,
             }))?
         );
     } else {
@@ -800,6 +1038,19 @@ pub async fn cmd_load(
             },
             db.source_name
         ));
+        if !bucket_summary.is_empty() {
+            let objects: u64 = bucket_summary
+                .iter()
+                .map(|b| b["objects"].as_u64().unwrap_or(0))
+                .sum();
+            ctx.say(format!(
+                "{} {objects} object{} across {} bucket{}",
+                if dry_run { "would upload" } else { "uploaded" },
+                if objects == 1 { "" } else { "s" },
+                bucket_summary.len(),
+                if bucket_summary.len() == 1 { "" } else { "s" }
+            ));
+        }
         if dry_run {
             ctx.say("dry run: rolled back, nothing was committed");
         }
@@ -899,11 +1150,55 @@ pub fn cmd_verify(ctx: &Ctx) -> Result<()> {
         }
     }
 
+    // Buckets verify entirely offline: every object is re-hashed from disk and
+    // compared with the manifest, and the manifest with the lock.
+    let mut bucket_objects = 0u64;
+    for (name, entry) in &lock.buckets {
+        let dir = out_dir.join("buckets").join(name);
+        match BucketExport::read(&dir) {
+            Err(e) => problems.push(format!("bucket {name}: {e:#}")),
+            Ok(export) => {
+                match export.hash() {
+                    Ok(h) if h == entry.sha256 => {}
+                    Ok(h) => problems.push(format!(
+                        "bucket {name}: manifest hash {h} does not match seedle.lock ({})",
+                        entry.sha256
+                    )),
+                    Err(e) => problems.push(format!("bucket {name}: {e:#}")),
+                }
+                for o in &export.objects {
+                    let path = match BucketExport::object_path(&dir, &o.path) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            problems.push(format!("bucket {name}: {e}"));
+                            continue;
+                        }
+                    };
+                    match std::fs::read(&path) {
+                        Err(e) => problems.push(format!("bucket {name}: {}: {e}", path.display())),
+                        Ok(bytes) => {
+                            let actual = crate::lock::file_hash(&bytes);
+                            if actual != o.sha256 {
+                                problems.push(format!(
+                                    "bucket {name}: {} changed since export (sha256 {actual}, \
+                                     manifest says {})",
+                                    o.path, o.sha256
+                                ));
+                            }
+                            bucket_objects += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if ctx.json {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "checked": checked,
+                "bucket_objects": bucket_objects,
                 "problems": problems,
                 "ok": problems.is_empty(),
             }))?
@@ -922,8 +1217,16 @@ pub fn cmd_verify(ctx: &Ctx) -> Result<()> {
     }
     if !ctx.json {
         ctx.say(format!(
-            "verified {checked} table{} against {}",
+            "verified {checked} table{}{} against {}",
             if checked == 1 { "" } else { "s" },
+            if lock.buckets.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " and {bucket_objects} bucket object{}",
+                    if bucket_objects == 1 { "" } else { "s" }
+                )
+            },
             ctx.cfg.lock_path().display()
         ));
     }
@@ -968,6 +1271,7 @@ pub async fn cmd_init(cli: &Cli, url: Option<String>, force: bool) -> Result<()>
             url: url.clone(),
             read_only: true,
             origin: "--url".into(),
+            storage: None,
         };
         let db = Db::connect(&src).await?;
         tables = match engine {
@@ -1047,18 +1351,34 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
         Command::Diff => cmd_diff(&ctx).await,
         Command::Export {
             tables,
+            buckets,
+            no_buckets,
             format,
             out,
             force,
-        } => cmd_export(&ctx, tables, format, out, force).await,
+        } => cmd_export(&ctx, tables, buckets, no_buckets, format, out, force).await,
         Command::Plan { tables } => cmd_plan(&ctx, tables).await,
         Command::Load {
             tables,
+            buckets,
+            no_buckets,
             dry_run,
             no_transaction,
             yes,
             force,
-        } => cmd_load(&ctx, tables, dry_run, no_transaction, yes, force).await,
+        } => {
+            cmd_load(
+                &ctx,
+                tables,
+                buckets,
+                no_buckets,
+                dry_run,
+                no_transaction,
+                yes,
+                force,
+            )
+            .await
+        }
         Command::Verify => cmd_verify(&ctx),
     }
 }

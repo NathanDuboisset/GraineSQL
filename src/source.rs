@@ -23,6 +23,8 @@ pub struct ResolvedSource {
     pub read_only: bool,
     /// Where the URL came from, for display. Never contains the URL itself.
     pub origin: String,
+    /// Object storage access, when the source declares it.
+    pub storage: Option<crate::storage::StorageAccess>,
 }
 
 impl ResolvedSource {
@@ -54,12 +56,64 @@ pub fn resolve(cfg: &Config, name: &str) -> Result<ResolvedSource> {
     let src = cfg.source(name)?;
     let (url, origin) = resolve_url(cfg, name, src)?;
     check_scheme(name, src.engine, &url)?;
+    let storage = match &src.storage {
+        None => None,
+        Some(sc) => Some(resolve_storage(cfg, name, src, sc)?),
+    };
     Ok(ResolvedSource {
         name: name.to_string(),
         engine: src.engine,
         url,
         read_only: src.read_only,
         origin,
+        storage,
+    })
+}
+
+/// Resolve a source's storage URL and service key.
+///
+/// The key is read the same way the database password is — from the source's
+/// `.env`, never from the config file — so a service-role key never lands in
+/// version control.
+fn resolve_storage(
+    cfg: &Config,
+    name: &str,
+    src: &SourceConfig,
+    sc: &crate::config::StorageConfig,
+) -> Result<crate::storage::StorageAccess> {
+    let vars = match &src.env_file {
+        Some(f) => read_env_file(&cfg.base_dir.join(f)).unwrap_or_default(),
+        None => BTreeMap::new(),
+    };
+    let lookup = |var: &str| -> Option<String> {
+        vars.get(var)
+            .cloned()
+            .or_else(|| std::env::var(var).ok())
+            .filter(|v| !v.trim().is_empty())
+    };
+
+    let base_url = match (&sc.url, &sc.url_var) {
+        (Some(u), _) => u.clone(),
+        (None, Some(var)) => lookup(var).ok_or_else(|| {
+            anyhow::anyhow!("source {name:?}: storage url variable {var} is not set")
+        })?,
+        (None, None) => bail!(
+            "source {name:?}: `storage` needs either `url` or `url_var` (the project base \
+             URL, e.g. http://127.0.0.1:54321)"
+        ),
+    };
+
+    let key_var = sc.key_var.as_deref().unwrap_or("SUPABASE_SERVICE_ROLE_KEY");
+    let key = lookup(key_var).ok_or_else(|| {
+        anyhow::anyhow!(
+            "source {name:?}: storage key variable {key_var} is not set.\n\
+             Storage listing and writing need the service-role key, not the anon key."
+        )
+    })?;
+
+    Ok(crate::storage::StorageAccess {
+        base_url: base_url.trim_end_matches('/').to_string(),
+        key,
     })
 }
 
@@ -234,6 +288,7 @@ mod tests {
             url: url.into(),
             read_only: false,
             origin: "test".into(),
+            storage: None,
         };
         assert!(mk("postgres://localhost/app").is_local());
         assert!(mk("postgres://127.0.0.1:5432/app").is_local());

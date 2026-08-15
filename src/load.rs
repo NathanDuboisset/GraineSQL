@@ -705,6 +705,7 @@ mod tests {
             url: url.into(),
             read_only,
             origin: "test".into(),
+            storage: None,
         }
     }
 

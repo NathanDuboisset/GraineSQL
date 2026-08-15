@@ -1,0 +1,81 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+
+    # A real Postgres, because there is no useful way to fake schema
+    # introspection. The bucket tests need a storage service and are skipped
+    # here; they run in the `storage` job below.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install psql
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --all-features
+      - name: Test
+        env:
+          SEEDLE_TEST_PG: postgres://postgres:postgres@localhost:5432
+        run: cargo test --all-features
+
+  storage:
+    name: storage (supabase)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Start Supabase
+        run: supabase init --force && supabase start
+
+      - name: Test buckets
+        run: |
+          # The CLI's local keys are fixed and public, so reading them here is
+          # not a secret leak.
+          echo "SEEDLE_TEST_PG=postgres://postgres:postgres@127.0.0.1:54322" >> "$GITHUB_ENV"
+          echo "SEEDLE_TEST_STORAGE_URL=http://127.0.0.1:54321" >> "$GITHUB_ENV"
+          echo "SEEDLE_TEST_STORAGE_KEY=$(supabase status -o json | jq -r .SERVICE_ROLE_KEY)" >> "$GITHUB_ENV"
+      - run: cargo test --test buckets
+
+  msrv:
+    name: minimum supported rust version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: Swatinem/rust-cache@v2
+      # Building the library is enough to catch a newer-Rust feature slipping in.
+      - run: cargo check --all-features

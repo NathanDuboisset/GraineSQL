@@ -71,11 +71,19 @@ pub enum Command {
     /// Show how the live schema differs from seedle.lock.
     Diff,
 
-    /// Export rows from the source into seed files.
+    /// Export rows and storage buckets from the source into seed files.
     Export {
         /// Only these tables. Names match the config key or the bare table name.
         #[arg(long, value_delimiter = ',')]
         tables: Option<Vec<String>>,
+
+        /// Only these storage buckets.
+        #[arg(long, value_delimiter = ',', conflicts_with = "no_buckets")]
+        buckets: Option<Vec<String>>,
+
+        /// Skip storage buckets entirely.
+        #[arg(long)]
+        no_buckets: bool,
 
         /// Override the output format for this run.
         #[arg(long)]
@@ -96,11 +104,19 @@ pub enum Command {
         tables: Option<Vec<String>>,
     },
 
-    /// Load seed files into the target database.
+    /// Load seed files into the target database and its storage buckets.
     #[command(alias = "seed")]
     Load {
         #[arg(long, value_delimiter = ',')]
         tables: Option<Vec<String>>,
+
+        /// Only these storage buckets.
+        #[arg(long, value_delimiter = ',', conflicts_with = "no_buckets")]
+        buckets: Option<Vec<String>>,
+
+        /// Skip storage buckets entirely.
+        #[arg(long)]
+        no_buckets: bool,
 
         /// Do everything except commit.
         #[arg(long)]
@@ -170,6 +186,18 @@ mod tests {
     #[test]
     fn verbose_and_quiet_are_mutually_exclusive() {
         assert!(Cli::try_parse_from(["seedle", "-v", "-q", "diff"]).is_err());
+    }
+
+    #[test]
+    fn bucket_selection_and_skipping_are_mutually_exclusive() {
+        assert!(
+            Cli::try_parse_from(["seedle", "export", "--buckets", "a", "--no-buckets"]).is_err()
+        );
+        let cli = Cli::try_parse_from(["seedle", "export", "--buckets", "a,b"]).unwrap();
+        let Command::Export { buckets, .. } = cli.command else {
+            panic!("expected export")
+        };
+        assert_eq!(buckets.unwrap(), ["a", "b"]);
     }
 
     #[test]

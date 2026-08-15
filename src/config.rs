@@ -94,6 +94,21 @@ impl LoadMode {
     }
 }
 
+/// How to reach a source's object storage, for bucket export and load.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StorageConfig {
+    /// Variable holding the project base URL (`http://127.0.0.1:54321`).
+    #[serde(default)]
+    pub url_var: Option<String>,
+    /// Literal base URL. Discouraged for the same reason as `url`.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Variable holding the service-role key. An anon key cannot list or write.
+    #[serde(default)]
+    pub key_var: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceConfig {
@@ -113,6 +128,9 @@ pub struct SourceConfig {
     /// The source used when `--source` is omitted.
     #[serde(default)]
     pub default: bool,
+    /// Object storage access. Required only if the config declares buckets.
+    #[serde(default)]
+    pub storage: Option<StorageConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -220,6 +238,17 @@ pub struct TableConfig {
     pub key: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BucketConfig {
+    /// Only export objects under this key prefix.
+    #[serde(default)]
+    pub prefix: Option<String>,
+    /// Refuse any object larger than this, rather than pulling it into git.
+    #[serde(default)]
+    pub max_object_bytes: Option<u64>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -231,6 +260,9 @@ pub struct Config {
     pub load: LoadConfig,
     #[serde(default)]
     pub tables: IndexMap<String, TableConfig>,
+    /// Storage buckets to export and load alongside the tables.
+    #[serde(default)]
+    pub buckets: IndexMap<String, BucketConfig>,
 
     /// Directory the config was loaded from. Every relative path in the config
     /// resolves against this, not against the process working directory.
@@ -319,6 +351,30 @@ impl Config {
                     "source {name:?} specifies no credentials: set one of `url`, \
                      `env_file`, or `url_var`"
                 );
+            }
+        }
+
+        if !self.buckets.is_empty() {
+            let without: Vec<&str> = self
+                .sources
+                .iter()
+                .filter(|(_, s)| s.storage.is_none())
+                .map(|(n, _)| n.as_str())
+                .collect();
+            if !without.is_empty() {
+                bail!(
+                    "the config declares buckets, but source{} {} define no `storage:` block, \
+                     so bucket objects cannot be read or written there.\n\
+                     Add `storage: {{url_var: ..., key_var: ...}}` to each source, or remove the \
+                     `buckets:` section.",
+                    if without.len() == 1 { "" } else { "s" },
+                    without.join(", ")
+                );
+            }
+        }
+        for name in self.buckets.keys() {
+            if name.is_empty() || name.contains('/') {
+                bail!("bucket name {name:?} is not a valid bucket id");
             }
         }
 
@@ -470,6 +526,40 @@ impl Config {
                 missing.join(", "),
                 if missing.len() == 1 { "is" } else { "are" },
                 self.tables.keys().cloned().collect::<Vec<_>>().join(", ")
+            );
+        }
+        Ok(picked)
+    }
+}
+
+impl Config {
+    /// Buckets narrowed by a `--buckets a,b` selection.
+    pub fn select_buckets(&self, only: Option<&[String]>) -> Result<Vec<(String, BucketConfig)>> {
+        let all: Vec<(String, BucketConfig)> = self
+            .buckets
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let Some(only) = only else { return Ok(all) };
+
+        let mut wanted: BTreeSet<&str> = only.iter().map(|s| s.as_str()).collect();
+        let mut picked = Vec::new();
+        for (name, cfg) in all {
+            if wanted.remove(name.as_str()) {
+                picked.push((name, cfg));
+            }
+        }
+        if !wanted.is_empty() {
+            let missing: Vec<&str> = wanted.into_iter().collect();
+            bail!(
+                "--buckets named {} which {} not in the config; configured buckets: {}",
+                missing.join(", "),
+                if missing.len() == 1 { "is" } else { "are" },
+                if self.buckets.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    self.buckets.keys().cloned().collect::<Vec<_>>().join(", ")
+                }
             );
         }
         Ok(picked)

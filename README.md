@@ -1,11 +1,11 @@
 # seedle
 
-Export selected rows from a database into deterministic, diffable seed files.
-Load them back into another database in foreign-key order.
+Export selected rows — and storage buckets — from a database into deterministic,
+diffable seed files. Load them back into another database in foreign-key order.
 
 ```
-seedle export                 # prod  -> seed/*.jsonl   (commit these)
-seedle load --source dev      # files -> dev database
+seedle export                 # prod  -> seed/*.jsonl + buckets/   (commit these)
+seedle load --source dev      # files -> dev database and its buckets
 ```
 
 A `seedle.lock` file records the schema the seed files were written against.
@@ -27,10 +27,16 @@ matches what the files were written against.
 ## Install
 
 ```sh
-cargo install --path .
+brew install Delos-Intelligence/tap/seedle   # macOS and Linux
+cargo binstall seedle                        # prebuilt binary, no compile
+cargo install seedle                         # from source
 ```
 
-Requires Rust 1.85+ (2024 edition). Postgres 12+ or MySQL 8+.
+Or download a binary from [Releases](https://github.com/Delos-Intelligence/seedle/releases);
+each archive ships a `.sha256` beside it.
+
+Building from source needs Rust 1.85+ (2024 edition). Runtime: Postgres 12+ or
+MySQL 8+.
 
 ## Getting started
 
@@ -121,10 +127,57 @@ you export from.
 | `seedle export` | Pull rows into seed files |
 | `seedle plan` | Load order, row counts, per-table action. Writes nothing |
 | `seedle load` | Push seed files into a database |
-| `seedle verify` | Check the seed files against the lock. Needs no database |
+| `seedle verify` | Re-hash the seed files and bucket objects against the lock. Needs no network |
 
 Global flags: `--config`, `--source`, `--json`, `-v`, `-q`.
-`--tables a,b` narrows `export`, `plan`, and `load`.
+`--tables a,b` narrows `export`, `plan`, and `load`; `--buckets a,b` and
+`--no-buckets` do the same for storage.
+
+## Storage buckets
+
+Object storage is the half of a Supabase project a SQL dump cannot capture. Point
+a source at its storage service and list the buckets:
+
+```yaml
+sources:
+  local:
+    engine: postgres
+    env_file: .env
+    url_var: SUPABASE_DB_URL
+    storage:
+      url_var: SUPABASE_URL                 # http://127.0.0.1:54321
+      key_var: SUPABASE_SERVICE_ROLE_KEY    # the service-role key, not anon
+
+buckets:
+  project_files: {}
+  avatars:
+    prefix: "public/"          # only objects under this key prefix
+    max_object_bytes: 1048576  # refuse anything larger (default 25 MiB)
+```
+
+Each bucket lands as:
+
+```
+seed/buckets/project_files/
+  bucket.json        settings: public, size limit, allowed mime types
+  manifest.jsonl     one line per object: path, size, sha256, content type
+  objects/<key>      the bytes, mirroring the object key
+```
+
+The manifest carries a **sha256 per object**, and `seedle.lock` records one hash
+over the manifest and settings — so a single value covers every byte in the
+bucket, and a change to any file, name, or setting moves it. `seedle verify`
+re-hashes every object from disk and needs no network.
+
+Loading uploads with upsert, creating the bucket if it is missing, and runs
+**after** the database transaction commits — object storage has no transaction to
+join, so uploading earlier could leave files behind for rows that were then
+rolled back. A local file whose hash no longer matches the manifest is refused
+rather than pushed.
+
+Object keys are validated before any bytes move: a key containing `..`, a leading
+`/`, or a backslash is refused rather than silently rewritten, so a hostile key
+cannot write outside the seed directory.
 
 ## Schema drift
 
@@ -261,11 +314,16 @@ seedle verify         # fails if the seed files no longer match the lock
 
 ```sh
 cargo test                                              # unit tests only
-SEEDLE_TEST_PG=postgres://user@localhost cargo test     # + integration tests
+SEEDLE_TEST_PG=postgres://user@localhost cargo test     # + database tests
+
+# Bucket tests additionally need a storage service:
+export SEEDLE_TEST_STORAGE_URL=http://127.0.0.1:54321
+export SEEDLE_TEST_STORAGE_KEY=<service-role key>
+cargo test --test buckets
 ```
 
-The integration tests create and drop their own databases, and skip rather than
-fail when `SEEDLE_TEST_PG` is unset. The most valuable one is
+The integration tests create and drop their own databases and buckets, and skip
+rather than fail when those variables are unset. The most valuable one is
 `export_then_load_then_export_is_byte_identical`: it exercises every encoder and
 decoder at once and fails on any asymmetry between them.
 
@@ -293,6 +351,10 @@ documented in `src/db/mysql.rs`, and the ones worth checking first are
 - A table's rows are read as a stream but each seed file is built in memory. Seed
   data that does not fit in memory does not belong in git either.
 - `.sql` output cannot be read back.
+- Bucket objects are held in memory one at a time while hashing, so
+  `max_object_bytes` (default 25 MiB) guards against pulling something into git
+  that does not belong there.
+- Supabase Storage rejects non-ASCII object keys itself, so those cannot occur.
 - In `json: unroll` mode, a json column whose value is a bare scalar (`null`,
   a number, a string) is written quoted rather than nested. Unrolling those would
   make a JSON `null` indistinguishable from SQL `NULL`, which would silently

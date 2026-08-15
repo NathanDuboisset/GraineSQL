@@ -45,6 +45,20 @@ pub struct Lock {
     pub enums: IndexMap<String, Vec<String>>,
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub files: IndexMap<TableId, FileEntry>,
+    /// Storage buckets, keyed by bucket id. One hash per bucket covers every
+    /// object's bytes, name, and the bucket's own settings.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub buckets: IndexMap<String, BucketEntry>,
+}
+
+/// A bucket's recorded state, for `seedle verify`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BucketEntry {
+    pub objects: u64,
+    pub bytes: u64,
+    /// Hex sha256 over the bucket's settings and manifest, which in turn hold
+    /// every object's own sha256.
+    pub sha256: String,
 }
 
 impl Lock {
@@ -59,6 +73,7 @@ impl Lock {
             schema: schema.tables.clone(),
             enums: schema.enums.clone(),
             files: IndexMap::new(),
+            buckets: IndexMap::new(),
         };
         lock.fingerprint = fingerprint_schema(schema);
         lock

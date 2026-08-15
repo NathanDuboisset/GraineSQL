@@ -25,6 +25,27 @@ use crate::source::ResolvedSource;
 /// One row, every column already rendered as text. `None` is SQL NULL.
 pub type TextRow = Vec<Option<String>>;
 
+/// Levenshtein distance, for "did you mean" suggestions.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.is_empty() {
+        return b.len();
+    }
+    // Only the previous row is needed, so this stays O(min) in memory.
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            cur[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
 /// Enum type name a class refers to, looking through arrays.
 fn enum_name(class: &TypeClass) -> Option<String> {
     match class {
@@ -44,22 +65,44 @@ pub struct Missing {
 
 impl Missing {
     /// Error text for the case where the caller cannot explain the absence.
+    ///
+    /// Names a likely intended table per missing entry rather than dumping the
+    /// whole catalogue: a real database has hundreds of tables, and a wall of
+    /// them buries the one line that matters.
     pub fn describe(&self) -> String {
+        let mut out = String::new();
         let names: Vec<String> = self.wanted.iter().map(|t| t.to_string()).collect();
-        let mut found: Vec<String> = self.found.iter().map(|t| t.to_string()).collect();
-        found.sort();
-        format!(
-            "table{} {} listed in the config {} not exist in the database.\n\
-             Tables found: {}",
+        out.push_str(&format!(
+            "table{} {} listed in the config {} not exist in the database.\n",
             if names.len() == 1 { "" } else { "s" },
             names.join(", "),
-            if names.len() == 1 { "does" } else { "do" },
-            if found.is_empty() {
-                "(none)".to_string()
-            } else {
-                found.join(", ")
+            if names.len() == 1 { "does" } else { "do" }
+        ));
+
+        for missing in &self.wanted {
+            match self.closest(&missing.name) {
+                Some(hit) => out.push_str(&format!("  {missing}  — did you mean {hit}?\n")),
+                None => out.push_str(&format!("  {missing}  — no similar table name\n")),
             }
-        )
+        }
+        out.push_str(&format!(
+            "The database has {} table{} in total; run `seedle init --url ...` to list them.",
+            self.found.len(),
+            if self.found.len() == 1 { "" } else { "s" }
+        ));
+        out
+    }
+
+    /// The existing table whose name is closest to `name`, if any is close.
+    fn closest(&self, name: &str) -> Option<&TableId> {
+        self.found
+            .iter()
+            .map(|t| (edit_distance(name, &t.name), t))
+            // A suggestion is only helpful if it is actually similar; a third of
+            // the name being different is where it stops being a likely typo.
+            .filter(|(d, t)| *d * 3 <= t.name.len().max(name.len()))
+            .min_by_key(|(d, t)| (*d, t.to_string()))
+            .map(|(_, t)| t)
     }
 }
 
@@ -465,6 +508,70 @@ mod tests {
         let missing = missing.expect("the absent table should be reported");
         assert_eq!(missing.wanted, [TableId::bare("gone")]);
         assert!(missing.describe().contains("gone"));
-        assert!(missing.describe().contains("(none)"));
+    }
+
+    #[test]
+    fn a_missing_table_error_suggests_a_near_match_not_the_whole_catalogue() {
+        let mut tables = IndexMap::new();
+        for name in ["c_agents_v2", "g_companies", "g_projects", "r_files"] {
+            let id = TableId::new("public", name);
+            tables.insert(
+                id.clone(),
+                crate::schema::Table {
+                    id,
+                    columns: vec![],
+                    primary_key: vec![],
+                    unique: vec![],
+                    foreign_keys: vec![],
+                },
+            );
+        }
+        let schema = Schema {
+            default_schema: "public".into(),
+            tables,
+            enums: IndexMap::new(),
+        };
+
+        let (_p, missing) = prune(&schema, &[TableId::bare("c_agents")]).unwrap();
+        let text = missing.expect("missing").describe();
+        assert!(text.contains("did you mean public.c_agents_v2?"), "{text}");
+        // The full table list must not be dumped; a real database has hundreds.
+        assert!(!text.contains("g_companies"), "{text}");
+        assert!(text.contains("4 tables in total"), "{text}");
+    }
+
+    #[test]
+    fn an_unrelated_name_gets_no_bogus_suggestion() {
+        let mut tables = IndexMap::new();
+        let id = TableId::new("public", "g_companies");
+        tables.insert(
+            id.clone(),
+            crate::schema::Table {
+                id,
+                columns: vec![],
+                primary_key: vec![],
+                unique: vec![],
+                foreign_keys: vec![],
+            },
+        );
+        let schema = Schema {
+            default_schema: "public".into(),
+            tables,
+            enums: IndexMap::new(),
+        };
+        let (_p, missing) = prune(&schema, &[TableId::bare("zzzzzz")]).unwrap();
+        let text = missing.expect("missing").describe();
+        assert!(text.contains("no similar table name"), "{text}");
+    }
+
+    #[test]
+    fn edit_distance_is_symmetric_and_correct() {
+        assert_eq!(edit_distance("", ""), 0);
+        assert_eq!(edit_distance("a", ""), 1);
+        assert_eq!(edit_distance("", "abc"), 3);
+        assert_eq!(edit_distance("kitten", "sitting"), 3);
+        assert_eq!(edit_distance("c_agents", "c_agents_v2"), 3);
+        assert_eq!(edit_distance("abc", "abc"), 0);
+        assert_eq!(edit_distance("abc", "cba"), edit_distance("cba", "abc"));
     }
 }
