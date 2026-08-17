@@ -155,7 +155,7 @@ jobs:
             echo "HOMEBREW_TAP_TOKEN is not set; skipping the tap update." >&2
             exit 0
           fi
-          git clone "https://x-access-token:${TAP_TOKEN}@github.com/Delos-Intelligence/homebrew-tap.git" tap
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/NathanDuboisset/homebrew-tap.git" tap
           mkdir -p tap/Formula
           cp out/seedle.rb tap/Formula/seedle.rb
           cd tap

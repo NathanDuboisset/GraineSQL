@@ -9,7 +9,10 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
+use indexmap::IndexMap;
+
 use crate::schema::{Column, ForeignKey, Schema, Table, TableId, TypeClass};
+use crate::storage::BucketSettings;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
@@ -28,12 +31,54 @@ impl Severity {
     }
 }
 
+/// What a drift entry is about.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Target {
+    Table(TableId),
+    Column(TableId, String),
+    /// A storage bucket. Buckets are created by migrations, so seedle only ever
+    /// checks them — it never creates or reconfigures one.
+    Bucket(String),
+}
+
+impl fmt::Display for Target {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Target::Table(t) => write!(f, "{t}"),
+            Target::Column(t, c) => write!(f, "{t}.{c}"),
+            Target::Bucket(b) => write!(f, "bucket {b}"),
+        }
+    }
+}
+
+impl Target {
+    /// The table this concerns, for machine-readable output.
+    pub fn table(&self) -> Option<&TableId> {
+        match self {
+            Target::Table(t) | Target::Column(t, _) => Some(t),
+            Target::Bucket(_) => None,
+        }
+    }
+
+    pub fn column(&self) -> Option<&str> {
+        match self {
+            Target::Column(_, c) => Some(c),
+            _ => None,
+        }
+    }
+
+    pub fn bucket(&self) -> Option<&str> {
+        match self {
+            Target::Bucket(b) => Some(b),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Drift {
     pub severity: Severity,
-    pub table: TableId,
-    /// The column involved, when the change is column-scoped.
-    pub column: Option<String>,
+    pub target: Target,
     /// What changed, in one line.
     pub what: String,
     /// Why it is classified this way, and what to do. Empty for benign items
@@ -43,10 +88,7 @@ pub struct Drift {
 
 impl fmt::Display for Drift {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.column {
-            Some(c) => write!(f, "{}.{c}  {}", self.table, self.what),
-            None => write!(f, "{}  {}", self.table, self.what),
-        }
+        write!(f, "{}  {}", self.target, self.what)
     }
 }
 
@@ -90,7 +132,7 @@ impl Report {
         let width = self
             .drifts
             .iter()
-            .map(|d| target_of(d).chars().count())
+            .map(|d| d.target.to_string().chars().count())
             .max()
             .unwrap_or(0)
             .min(48);
@@ -108,7 +150,7 @@ impl Report {
             for d in group {
                 out.push_str(&format!(
                     "  {:width$}  {}\n",
-                    target_of(d),
+                    d.target.to_string(),
                     d.what,
                     width = width
                 ));
@@ -131,13 +173,6 @@ impl Report {
     }
 }
 
-fn target_of(d: &Drift) -> String {
-    match &d.column {
-        Some(c) => format!("{}.{c}", d.table),
-        None => d.table.to_string(),
-    }
-}
-
 /// Compare the locked schema against a freshly introspected one.
 ///
 /// `locked` is the contract the committed seed files were written against;
@@ -149,8 +184,7 @@ pub fn classify(locked: &Schema, live: &Schema) -> Report {
         match live.get(id) {
             None => drifts.push(Drift {
                 severity: Severity::Breaking,
-                table: id.clone(),
-                column: None,
+                target: Target::Table(id.clone()),
                 what: "table dropped".into(),
                 note: "the seed files for it have nowhere to load".into(),
             }),
@@ -164,8 +198,7 @@ pub fn classify(locked: &Schema, live: &Schema) -> Report {
         if locked.get(id).is_none() {
             drifts.push(Drift {
                 severity: Severity::Benign,
-                table: id.clone(),
-                column: None,
+                target: Target::Table(id.clone()),
                 what: "table added".into(),
                 // Only tables listed in the config are ever touched, so a new
                 // table cannot affect an existing load.
@@ -181,8 +214,7 @@ pub fn classify(locked: &Schema, live: &Schema) -> Report {
     drifts.sort_by(|a, b| {
         a.severity
             .cmp(&b.severity)
-            .then_with(|| a.table.cmp(&b.table))
-            .then_with(|| a.column.cmp(&b.column))
+            .then_with(|| a.target.cmp(&b.target))
             .then_with(|| a.what.cmp(&b.what))
     });
 
@@ -190,14 +222,11 @@ pub fn classify(locked: &Schema, live: &Schema) -> Report {
 }
 
 fn compare_table(id: &TableId, locked: &Table, live: &Table, out: &mut Vec<Drift>) {
-    let col = |name: &str| -> Option<String> { Some(name.to_string()) };
-
     for lc in &locked.columns {
         match live.column(&lc.name) {
             None => out.push(Drift {
                 severity: Severity::Breaking,
-                table: id.clone(),
-                column: col(&lc.name),
+                target: Target::Column(id.clone(), lc.name.clone()),
                 what: format!("column dropped (was {})", lc.class.label()),
                 note: "the seed files carry a value for it".into(),
             }),
@@ -216,8 +245,7 @@ fn compare_table(id: &TableId, locked: &Table, live: &Table, out: &mut Vec<Drift
             } else {
                 Severity::Breaking
             },
-            table: id.clone(),
-            column: col(&vc.name),
+            target: Target::Column(id.clone(), vc.name.clone()),
             what: format!(
                 "column added ({}{})",
                 vc.class.label(),
@@ -242,8 +270,7 @@ fn compare_table(id: &TableId, locked: &Table, live: &Table, out: &mut Vec<Drift
     if locked.primary_key != live.primary_key {
         out.push(Drift {
             severity: Severity::Breaking,
-            table: id.clone(),
-            column: None,
+            target: Target::Table(id.clone()),
             what: format!(
                 "primary key {} -> {}",
                 fmt_key(&locked.primary_key),
@@ -258,8 +285,7 @@ fn compare_table(id: &TableId, locked: &Table, live: &Table, out: &mut Vec<Drift
     for gone in locked_uq.difference(&live_uq) {
         out.push(Drift {
             severity: Severity::Breaking,
-            table: id.clone(),
-            column: None,
+            target: Target::Table(id.clone()),
             what: format!("unique constraint dropped on {}", fmt_key(gone)),
             note: "it may be the conflict target an upsert relies on".into(),
         });
@@ -267,8 +293,7 @@ fn compare_table(id: &TableId, locked: &Table, live: &Table, out: &mut Vec<Drift
     for added in live_uq.difference(&locked_uq) {
         out.push(Drift {
             severity: Severity::Benign,
-            table: id.clone(),
-            column: None,
+            target: Target::Table(id.clone()),
             what: format!("unique constraint added on {}", fmt_key(added)),
             note: String::new(),
         });
@@ -286,8 +311,7 @@ fn compare_column(id: &TableId, locked: &Column, live: &Column, out: &mut Vec<Dr
             } else {
                 Severity::Breaking
             },
-            table: id.clone(),
-            column: Some(locked.name.clone()),
+            target: Target::Column(id.clone(), locked.name.clone()),
             what: format!("{} -> {}", locked.class.label(), live.class.label()),
             note: if widens {
                 String::new()
@@ -308,8 +332,7 @@ fn compare_column(id: &TableId, locked: &Column, live: &Column, out: &mut Vec<Dr
             } else {
                 Severity::Breaking
             },
-            table: id.clone(),
-            column: Some(locked.name.clone()),
+            target: Target::Column(id.clone(), locked.name.clone()),
             what: "nullable -> NOT NULL".into(),
             note: if has_default {
                 "it has a default, but rows with an explicit null will still be rejected".into()
@@ -322,8 +345,7 @@ fn compare_column(id: &TableId, locked: &Column, live: &Column, out: &mut Vec<Dr
     if !locked.nullable && live.nullable {
         out.push(Drift {
             severity: Severity::Benign,
-            table: id.clone(),
-            column: Some(locked.name.clone()),
+            target: Target::Column(id.clone(), locked.name.clone()),
             what: "NOT NULL -> nullable".into(),
             note: String::new(),
         });
@@ -332,8 +354,7 @@ fn compare_column(id: &TableId, locked: &Column, live: &Column, out: &mut Vec<Dr
     if !locked.generated && live.generated {
         out.push(Drift {
             severity: Severity::Breaking,
-            table: id.clone(),
-            column: Some(locked.name.clone()),
+            target: Target::Column(id.clone(), locked.name.clone()),
             what: "column became generated".into(),
             note: "a generated column cannot be written to".into(),
         });
@@ -347,8 +368,7 @@ fn compare_foreign_keys(id: &TableId, locked: &Table, live: &Table, out: &mut Ve
         match live.foreign_keys.iter().find(|f| f.columns == lfk.columns) {
             None => out.push(Drift {
                 severity: Severity::Breaking,
-                table: id.clone(),
-                column: None,
+                target: Target::Table(id.clone()),
                 what: format!("foreign key on {} dropped", fmt_key(&lfk.columns)),
                 note: "load order was computed from it".into(),
             }),
@@ -356,8 +376,7 @@ fn compare_foreign_keys(id: &TableId, locked: &Table, live: &Table, out: &mut Ve
                 if vfk.references != lfk.references || vfk.ref_columns != lfk.ref_columns {
                     out.push(Drift {
                         severity: Severity::Breaking,
-                        table: id.clone(),
-                        column: None,
+                        target: Target::Table(id.clone()),
                         what: format!(
                             "foreign key on {} retargeted: {} -> {}",
                             fmt_key(&lfk.columns),
@@ -377,8 +396,7 @@ fn compare_foreign_keys(id: &TableId, locked: &Table, live: &Table, out: &mut Ve
         }
         out.push(Drift {
             severity: Severity::Breaking,
-            table: id.clone(),
-            column: None,
+            target: Target::Table(id.clone()),
             what: format!(
                 "foreign key added on {} -> {}",
                 fmt_key(&vfk.columns),
@@ -399,8 +417,7 @@ fn compare_enums(locked: &Schema, live: &Schema, out: &mut Vec<Drift>) {
             }
             out.push(Drift {
                 severity: Severity::Breaking,
-                table: enum_owner(locked, name),
-                column: None,
+                target: Target::Table(enum_owner(locked, name)),
                 what: format!("enum type {name} dropped"),
                 note: String::new(),
             });
@@ -412,8 +429,7 @@ fn compare_enums(locked: &Schema, live: &Schema, out: &mut Vec<Drift>) {
             if !live_set.contains(label) {
                 out.push(Drift {
                     severity: Severity::Breaking,
-                    table: enum_owner(locked, name),
-                    column: None,
+                    target: Target::Table(enum_owner(locked, name)),
                     what: format!("enum {name}: label {label:?} removed"),
                     note: "seed rows holding that label can no longer be loaded".into(),
                 });
@@ -424,8 +440,7 @@ fn compare_enums(locked: &Schema, live: &Schema, out: &mut Vec<Drift>) {
             if !locked_set.contains(label) {
                 out.push(Drift {
                     severity: Severity::Benign,
-                    table: enum_owner(locked, name),
-                    column: None,
+                    target: Target::Table(enum_owner(locked, name)),
                     what: format!("enum {name}: label {label:?} added"),
                     note: String::new(),
                 });
@@ -458,6 +473,107 @@ fn enum_owner(schema: &Schema, name: &str) -> TableId {
         .find(|(_, t)| t.columns.iter().any(|c| uses_enum(&c.class, name)))
         .map(|(id, _)| id.clone())
         .unwrap_or_else(|| TableId::bare(format!("(enum {name})")))
+}
+
+/// Compare locked bucket settings against the live ones.
+///
+/// Buckets are created and configured by migrations, so seedle never writes
+/// these — it only reports when they no longer match what the seed files were
+/// exported against. The question each rule answers is the same as for tables:
+/// would this make the existing objects fail to load?
+pub fn classify_buckets(
+    locked: &IndexMap<String, BucketSettings>,
+    live: &IndexMap<String, BucketSettings>,
+    largest_object: &IndexMap<String, u64>,
+) -> Vec<Drift> {
+    let mut out = Vec::new();
+
+    for (name, l) in locked {
+        let Some(v) = live.get(name) else {
+            out.push(Drift {
+                severity: Severity::Breaking,
+                target: Target::Bucket(name.clone()),
+                what: "bucket does not exist".into(),
+                note: "buckets are created by migrations; run them against this project".into(),
+            });
+            continue;
+        };
+
+        // A size limit below the largest exported object rejects that upload.
+        if let Some(limit) = v.file_size_limit {
+            let biggest = largest_object.get(name).copied().unwrap_or(0);
+            let was = l.file_size_limit.unwrap_or(u64::MAX);
+            if limit < biggest {
+                out.push(Drift {
+                    severity: Severity::Breaking,
+                    target: Target::Bucket(name.clone()),
+                    what: format!(
+                        "file size limit {} is below the largest exported object ({biggest} bytes)",
+                        limit
+                    ),
+                    note: "that object would be rejected on upload".into(),
+                });
+            } else if limit < was {
+                out.push(Drift {
+                    severity: Severity::Benign,
+                    target: Target::Bucket(name.clone()),
+                    what: format!("file size limit lowered to {limit}"),
+                    note: String::new(),
+                });
+            }
+        }
+
+        // A mime allowlist that no longer covers an exported object's type.
+        if l.allowed_mime_types != v.allowed_mime_types {
+            out.push(Drift {
+                severity: Severity::Benign,
+                target: Target::Bucket(name.clone()),
+                what: format!(
+                    "allowed mime types {} -> {}",
+                    fmt_mimes(&l.allowed_mime_types),
+                    fmt_mimes(&v.allowed_mime_types)
+                ),
+                note: "an upload whose type is now excluded would be rejected".into(),
+            });
+        }
+
+        // Visibility does not affect whether an object can be written.
+        if l.public != v.public {
+            out.push(Drift {
+                severity: Severity::Benign,
+                target: Target::Bucket(name.clone()),
+                what: format!("public {} -> {}", l.public, v.public),
+                note: String::new(),
+            });
+        }
+    }
+
+    for name in live.keys() {
+        if !locked.contains_key(name) {
+            out.push(Drift {
+                severity: Severity::Benign,
+                target: Target::Bucket(name.clone()),
+                what: "bucket added".into(),
+                note: String::new(),
+            });
+        }
+    }
+
+    out.sort_by(|a, b| {
+        a.severity
+            .cmp(&b.severity)
+            .then_with(|| a.target.cmp(&b.target))
+            .then_with(|| a.what.cmp(&b.what))
+    });
+    out
+}
+
+fn fmt_mimes(m: &Option<Vec<String>>) -> String {
+    match m {
+        None => "any".to_string(),
+        Some(v) if v.is_empty() => "any".to_string(),
+        Some(v) => format!("[{}]", v.join(", ")),
+    }
 }
 
 fn fmt_key(cols: &[String]) -> String {
@@ -560,7 +676,7 @@ mod tests {
             users(s).columns.retain(|c| c.name != "age");
         });
         assert_eq!(only(&r).severity, Severity::Breaking);
-        assert_eq!(only(&r).column.as_deref(), Some("age"));
+        assert_eq!(only(&r).target.column(), Some("age"));
     }
 
     #[test]

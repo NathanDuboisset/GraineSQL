@@ -124,6 +124,19 @@ impl Storage {
         out.stdout
     }
 
+    /// Flip the bucket's visibility, to produce a settings change.
+    fn set_public(&self, public: bool) {
+        self.curl(&[
+            "-X",
+            "PUT",
+            &format!("{}/storage/v1/bucket/{}", self.url, self.bucket),
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            &format!("{{\"id\":\"{}\",\"public\":{public}}}", self.bucket),
+        ]);
+    }
+
     fn delete(&self, key: &str) {
         self.curl(&[
             "-X",
@@ -339,7 +352,7 @@ fn a_removed_object_disappears_from_the_export() {
 }
 
 #[test]
-fn loading_creates_a_missing_bucket() {
+fn a_missing_bucket_is_an_error_not_something_seedle_creates() {
     let base = require_pg!();
     let (url, key) = require_storage!();
     let s = Storage::new(&url, &key, "seedle_create");
@@ -349,10 +362,30 @@ fn loading_creates_a_missing_bucket() {
     f.ok(&["lock", "-q"]);
     f.ok(&["export", "-q"]);
 
-    // Drop the bucket entirely: a load into a fresh project must recreate it.
+    // Buckets are created by migrations. seedle moves data and must never
+    // create one behind the user's back with settings guessed from a seed file.
     s.delete_bucket();
-    f.ok(&["load", "--yes", "-v"]).says("created bucket");
-    assert_eq!(s.get("a.txt"), b"a");
+    let r = f.fail(&["load", "--yes"]);
+    r.says("bucket does not exist");
+    r.says("migrations");
+    r.does_not_say("created bucket");
+}
+
+#[test]
+fn changed_bucket_settings_are_reported_as_drift() {
+    let base = require_pg!();
+    let (url, key) = require_storage!();
+    let s = Storage::new(&url, &key, "seedle_settings");
+    let f = prepared("bucket_settings", &base, &url, &key, "seedle_settings");
+    s.put("a.txt", b"hello");
+
+    f.ok(&["lock", "-q"]);
+    f.ok(&["export", "-q"]);
+
+    // Flipping the bucket public does not stop an upload, so it is benign.
+    s.set_public(true);
+    // Not -q: drift notes are warnings, which quiet suppresses.
+    f.ok(&["export"]).says("public");
 }
 
 #[test]

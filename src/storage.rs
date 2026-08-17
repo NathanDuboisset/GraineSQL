@@ -9,7 +9,6 @@
 //!
 //! ```text
 //! seed_data/buckets/<bucket>/
-//!   bucket.json        settings: public, size limit, allowed mime types
 //!   manifest.jsonl     one line per object, sorted by path
 //!   objects/<key>      the bytes, mirroring the object key
 //! ```
@@ -17,6 +16,13 @@
 //! The manifest carries a sha256 per object, and the lock records a single hash
 //! over the manifest — so one value in `seedle.lock` covers every byte in the
 //! bucket, and `seedle verify` can re-check it all without a network call.
+//!
+//! A bucket's *settings* — public, size limit, allowed mime types — are schema,
+//! created and changed by migrations. They are recorded in `seedle.lock` as a
+//! contract to check against, never written as an editable file and never
+//! applied: seedle moves data, it does not touch schema. A bucket that does not
+//! exist in the target is an error telling you to run your migrations, not an
+//! invitation to create it.
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -34,10 +40,10 @@ const LIST_PAGE: usize = 1000;
 /// after a long download is worse than being told up front.
 pub const DEFAULT_MAX_OBJECT_BYTES: u64 = 25 * 1024 * 1024;
 
-/// Bucket settings, as they are written to `bucket.json`.
+/// Bucket settings, as recorded in the lock.
 ///
-/// Only the fields that are worth reproducing in another project: ids and
-/// timestamps are assigned by the target and would be pure diff noise.
+/// Only the fields that form a contract worth checking: ids and timestamps are
+/// assigned by the project and would be pure diff noise.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BucketSettings {
     pub name: String,
@@ -62,10 +68,9 @@ pub struct ObjectEntry {
     pub content_type: Option<String>,
 }
 
-/// A bucket as it exists on disk.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A bucket's *data* as it exists on disk. Settings live in the lock.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BucketExport {
-    pub settings: BucketSettings,
     /// Sorted by path, so the manifest is byte-stable.
     pub objects: Vec<ObjectEntry>,
 }
@@ -87,35 +92,23 @@ impl BucketExport {
         Ok(buf.finish())
     }
 
-    /// `bucket.json`'s exact bytes, pretty-printed since a human edits this one.
-    pub fn settings_bytes(&self) -> Result<Vec<u8>> {
-        let mut text =
-            serde_json::to_string_pretty(&self.settings).context("serializing bucket settings")?;
-        text.push('\n');
-        Ok(text.into_bytes())
-    }
-
-    /// One hash covering the whole bucket.
+    /// One hash covering the bucket's contents.
     ///
     /// Taken over the manifest rather than the file bytes, because the manifest
     /// already contains every object's own sha256 plus its path and size — so a
     /// change to any byte, name, or ordering changes this value, and computing
     /// it needs no second pass over the data.
     pub fn hash(&self) -> Result<String> {
-        let mut bytes = self.settings_bytes()?;
-        bytes.extend_from_slice(&self.manifest_bytes()?);
-        Ok(crate::lock::file_hash(&bytes))
+        Ok(crate::lock::file_hash(&self.manifest_bytes()?))
     }
 
-    /// Read a bucket back from disk, re-hashing every object.
-    pub fn read(dir: &Path) -> Result<BucketExport> {
-        let settings_path = dir.join("bucket.json");
-        let settings: BucketSettings = serde_json::from_str(
-            &std::fs::read_to_string(&settings_path)
-                .with_context(|| format!("reading {}", settings_path.display()))?,
-        )
-        .with_context(|| format!("parsing {}", settings_path.display()))?;
+    /// Size of the largest object, for checking against a bucket's size limit.
+    pub fn largest_object(&self) -> u64 {
+        self.objects.iter().map(|o| o.size).max().unwrap_or(0)
+    }
 
+    /// Read a bucket's manifest back from disk.
+    pub fn read(dir: &Path) -> Result<BucketExport> {
         let manifest_path = dir.join("manifest.jsonl");
         let text = std::fs::read_to_string(&manifest_path)
             .with_context(|| format!("reading {}", manifest_path.display()))?;
@@ -129,7 +122,7 @@ impl BucketExport {
                 .with_context(|| format!("parsing {}:{}", manifest_path.display(), i + 1))?;
             objects.push(entry);
         }
-        Ok(BucketExport { settings, objects })
+        Ok(BucketExport { objects })
     }
 
     /// Local path holding an object's bytes.
@@ -420,38 +413,6 @@ impl StorageClient {
         Ok(())
     }
 
-    /// Create the bucket if it is missing, so a load into a fresh project works.
-    pub async fn ensure_bucket(&self, settings: &BucketSettings) -> Result<bool> {
-        if self.bucket(&settings.name).await.is_ok() {
-            return Ok(false);
-        }
-        let body = serde_json::json!({
-            "id": settings.name,
-            "name": settings.name,
-            "public": settings.public,
-            "file_size_limit": settings.file_size_limit,
-            "allowed_mime_types": settings.allowed_mime_types,
-        });
-        let resp = self
-            .http
-            .post(format!("{}/bucket", self.access.storage_url()))
-            .bearer_auth(&self.access.key)
-            .json(&body)
-            .send()
-            .await
-            .with_context(|| format!("creating bucket {:?}", settings.name))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            bail!(
-                "creating bucket {:?} failed with {status}: {}",
-                settings.name,
-                truncate(&text)
-            );
-        }
-        Ok(true)
-    }
-
     /// Cheap reachability probe, for `seedle sources`.
     pub async fn ping(&self) -> Result<usize> {
         let resp = self
@@ -465,11 +426,14 @@ impl StorageClient {
 }
 
 /// Export one bucket: list it, download every object, hash as we go.
+///
+/// Returns the settings alongside the data so the caller can record them in the
+/// lock and compare them for drift; they are never written to the seed tree.
 pub async fn export_bucket(
     client: &StorageClient,
     name: &str,
     cfg: &BucketConfig,
-) -> Result<(BucketExport, Vec<(String, Vec<u8>)>)> {
+) -> Result<(BucketSettings, BucketExport, Vec<(String, Vec<u8>)>)> {
     let settings = client.bucket(name).await?;
     let prefix = cfg.prefix.clone().unwrap_or_default();
     let listed = client
@@ -505,7 +469,7 @@ pub async fn export_bucket(
     }
 
     objects.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok((BucketExport { settings, objects }, blobs))
+    Ok((settings, BucketExport { objects }, blobs))
 }
 
 /// Percent-encode one path segment.
@@ -575,15 +539,7 @@ mod tests {
     }
 
     fn export(objects: Vec<ObjectEntry>) -> BucketExport {
-        BucketExport {
-            settings: BucketSettings {
-                name: "project_files".into(),
-                public: false,
-                file_size_limit: Some(52428800),
-                allowed_mime_types: None,
-            },
-            objects,
-        }
+        BucketExport { objects }
     }
 
     // -- path safety --------------------------------------------------------
@@ -685,7 +641,7 @@ mod tests {
     // -- hashing ------------------------------------------------------------
 
     #[test]
-    fn the_bucket_hash_covers_content_names_and_settings() {
+    fn the_bucket_hash_covers_content_and_names() {
         let base = export(vec![entry("a.pdf", 3, "aa"), entry("b.pdf", 4, "bb")]);
         let h = base.hash().unwrap();
 
@@ -706,11 +662,6 @@ mod tests {
         let mut renamed = base.clone();
         renamed.objects[0].path = "renamed.pdf".into();
         assert_ne!(h, renamed.hash().unwrap(), "a rename must show");
-
-        // So does a settings change.
-        let mut public = base.clone();
-        public.settings.public = true;
-        assert_ne!(h, public.hash().unwrap(), "a settings change must show");
 
         // And a removal.
         let mut fewer = base.clone();
@@ -734,11 +685,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let e = export(vec![entry("a.pdf", 3, "aa"), entry("dir/b.pdf", 4, "bb")]);
 
-        crate::io::write_atomic(
-            &dir.path().join("bucket.json"),
-            &e.settings_bytes().unwrap(),
-        )
-        .unwrap();
         crate::io::write_atomic(
             &dir.path().join("manifest.jsonl"),
             &e.manifest_bytes().unwrap(),

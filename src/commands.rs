@@ -149,7 +149,41 @@ pub fn compute_order(schema: &Schema, cfg: &Config) -> Result<Vec<TableId>> {
 /// Breaking drift aborts; benign drift warns and continues. `force` downgrades
 /// breaking to a loud warning.
 pub fn gate_on_drift(ctx: &Ctx, lock: &Lock, live: &Schema, force: bool) -> Result<drift::Report> {
-    let report = drift::classify(&lock.to_schema(), live);
+    gate_on_drift_with_buckets(ctx, lock, live, &IndexMap::new(), force)
+}
+
+/// Same, additionally comparing storage bucket settings.
+///
+/// `live_buckets` is empty when the config declares no buckets, in which case
+/// this behaves exactly like [`gate_on_drift`].
+pub fn gate_on_drift_with_buckets(
+    ctx: &Ctx,
+    lock: &Lock,
+    live: &Schema,
+    live_buckets: &IndexMap<String, storage::BucketSettings>,
+    force: bool,
+) -> Result<drift::Report> {
+    let mut report = drift::classify(&lock.to_schema(), live);
+
+    if !lock.buckets.is_empty() || !live_buckets.is_empty() {
+        let largest: IndexMap<String, u64> = lock
+            .bucket_files
+            .iter()
+            .map(|(name, entry)| (name.clone(), entry.bytes))
+            .collect();
+        report.drifts.extend(drift::classify_buckets(
+            &lock.buckets,
+            live_buckets,
+            &largest,
+        ));
+        report.drifts.sort_by(|a, b| {
+            a.severity
+                .cmp(&b.severity)
+                .then_with(|| a.target.cmp(&b.target))
+                .then_with(|| a.what.cmp(&b.what))
+        });
+    }
+
     if report.is_empty() {
         return Ok(report);
     }
@@ -390,8 +424,10 @@ fn drift_json(report: &drift::Report) -> String {
         .map(|d| {
             serde_json::json!({
                 "severity": d.severity.label(),
-                "table": d.table.to_string(),
-                "column": d.column,
+                "target": d.target.to_string(),
+                "table": d.target.table().map(|t| t.to_string()),
+                "column": d.target.column(),
+                "bucket": d.target.bucket(),
                 "change": d.what,
                 "note": d.note,
             })
@@ -448,7 +484,12 @@ pub async fn cmd_export(
     // whatever happens to be in a scratch output directory.
     let existing = Lock::read(&ctx.cfg.lock_path()).ok();
     if let Some(lock) = &existing {
-        gate_on_drift(ctx, lock, &live, force)?;
+        let live_buckets = if no_buckets {
+            IndexMap::new()
+        } else {
+            live_bucket_settings(ctx, &_src, buckets.as_deref()).await?
+        };
+        gate_on_drift_with_buckets(ctx, lock, &live, &live_buckets, force)?;
     } else if !force {
         ctx.warn(format!(
             "note: no lock file at {} yet; it will be created by this export",
@@ -509,7 +550,7 @@ pub async fn cmd_export(
     }
 
     // Buckets: the half of a project a SQL dump cannot capture.
-    let (bucket_entries, bucket_summary) =
+    let (bucket_settings, bucket_entries, bucket_summary) =
         export_buckets(ctx, &_src, &out_dir, buckets.as_deref()).await?;
 
     // A table removed from the config leaves an orphan file behind, which would
@@ -521,7 +562,8 @@ pub async fn cmd_export(
 
     let mut lock = Lock::build(db.engine(), &live, &order);
     lock.files = files;
-    lock.buckets = bucket_entries;
+    lock.buckets = bucket_settings;
+    lock.bucket_files = bucket_entries;
     lock.write(&lock_path)?;
 
     if ctx.json {
@@ -537,21 +579,25 @@ pub async fn cmd_export(
             }))?
         );
     } else {
-        let objects: u64 = lock.buckets.values().map(|b| b.objects).sum();
+        let objects: u64 = lock.bucket_files.values().map(|b| b.objects).sum();
         ctx.say(format!(
             "exported {} table{}, {total_rows} row{}{} to {}",
             ordered.len(),
             if ordered.len() == 1 { "" } else { "s" },
             if total_rows == 1 { "" } else { "s" },
-            if lock.buckets.is_empty() {
+            if lock.bucket_files.is_empty() {
                 String::new()
             } else {
                 format!(
                     ", {} bucket{} ({objects} object{}, {})",
-                    lock.buckets.len(),
-                    if lock.buckets.len() == 1 { "" } else { "s" },
+                    lock.bucket_files.len(),
+                    if lock.bucket_files.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    },
                     if objects == 1 { "" } else { "s" },
-                    human_bytes(lock.buckets.values().map(|b| b.bytes).sum())
+                    human_bytes(lock.bucket_files.values().map(|b| b.bytes).sum())
                 )
             },
             out_dir.display()
@@ -567,6 +613,31 @@ pub async fn cmd_export(
 // buckets
 // ---------------------------------------------------------------------------
 
+/// Live settings for every configured bucket, for drift comparison.
+///
+/// Returns an empty map when the config declares no buckets, so a project
+/// without storage never pays for a network call.
+async fn live_bucket_settings(
+    ctx: &Ctx,
+    src: &ResolvedSource,
+    only: Option<&[String]>,
+) -> Result<IndexMap<String, storage::BucketSettings>> {
+    let selected = ctx.cfg.select_buckets(only)?;
+    let mut out = IndexMap::new();
+    if selected.is_empty() {
+        return Ok(out);
+    }
+    let client = storage_client(src)?;
+    for (name, _) in &selected {
+        // A missing bucket is reported as drift by the caller, which explains it
+        // far better than a bare request failure.
+        if let Ok(settings) = client.bucket(name).await {
+            out.insert(name.clone(), settings);
+        }
+    }
+    Ok(out)
+}
+
 /// Storage client for a source, or a clear error explaining what is missing.
 fn storage_client(src: &ResolvedSource) -> Result<StorageClient> {
     let access = src.storage.clone().ok_or_else(|| {
@@ -580,23 +651,30 @@ fn storage_client(src: &ResolvedSource) -> Result<StorageClient> {
 }
 
 /// Export every selected bucket into `out_dir/buckets/<name>/`.
+type BucketExportResult = (
+    IndexMap<String, storage::BucketSettings>,
+    IndexMap<String, BucketEntry>,
+    Vec<serde_json::Value>,
+);
+
 async fn export_buckets(
     ctx: &Ctx,
     src: &ResolvedSource,
     out_dir: &Path,
     only: Option<&[String]>,
-) -> Result<(IndexMap<String, BucketEntry>, Vec<serde_json::Value>)> {
+) -> Result<BucketExportResult> {
     let selected = ctx.cfg.select_buckets(only)?;
+    let mut settings_map = IndexMap::new();
     let mut entries = IndexMap::new();
     let mut summary = Vec::new();
     if selected.is_empty() {
-        return Ok((entries, summary));
+        return Ok((settings_map, entries, summary));
     }
 
     let client = storage_client(src)?;
 
     for (name, cfg) in &selected {
-        let (export, blobs) = storage::export_bucket(&client, name, cfg)
+        let (settings, export, blobs) = storage::export_bucket(&client, name, cfg)
             .await
             .with_context(|| format!("exporting bucket {name:?}"))?;
 
@@ -612,7 +690,6 @@ async fn export_buckets(
             let path = BucketExport::object_path(&dir, key)?;
             crate::io::write_atomic(&path, bytes)?;
         }
-        crate::io::write_atomic(&dir.join("bucket.json"), &export.settings_bytes()?)?;
         crate::io::write_atomic(&dir.join("manifest.jsonl"), &export.manifest_bytes()?)?;
 
         let bytes = export.total_bytes();
@@ -634,8 +711,9 @@ async fn export_buckets(
                 sha256: export.hash()?,
             },
         );
+        settings_map.insert(name.clone(), settings);
     }
-    Ok((entries, summary))
+    Ok((settings_map, entries, summary))
 }
 
 /// Upload every selected bucket back into a project.
@@ -696,9 +774,16 @@ async fn load_buckets(
             continue;
         }
 
-        if client.ensure_bucket(&export.settings).await? {
-            ctx.detail(format!("  created bucket {name}"));
-        }
+        // Buckets are created by migrations. seedle moves data and never
+        // touches schema, so a missing bucket is an error rather than something
+        // to silently create with settings it guessed from a seed file.
+        client.bucket(name).await.with_context(|| {
+            format!(
+                "bucket {name:?} must exist before its objects can be loaded — buckets are \
+                 created by migrations, so run them against this project first"
+            )
+        })?;
+
         for (key, bytes, content_type) in payloads {
             client
                 .upload(name, &key, bytes, content_type.as_deref())
@@ -738,10 +823,12 @@ fn human_bytes(n: u64) -> String {
 // ---------------------------------------------------------------------------
 
 /// Read every selected table's rows and build the load plan.
+#[allow(clippy::type_complexity)]
 async fn build_plans(
     ctx: &Ctx,
     db: &Db,
     live: &Schema,
+    live_buckets: &IndexMap<String, storage::BucketSettings>,
     tables: Option<Vec<String>>,
     force: bool,
 ) -> Result<(
@@ -750,7 +837,7 @@ async fn build_plans(
 )> {
     let selected = ctx.cfg.select_tables(tables.as_deref())?;
     let lock = Lock::read(&ctx.cfg.lock_path())?;
-    gate_on_drift(ctx, &lock, live, force)?;
+    gate_on_drift_with_buckets(ctx, &lock, live, live_buckets, force)?;
 
     let out_dir = ctx.cfg.out_dir();
     let order = compute_order(live, &ctx.cfg)?;
@@ -796,7 +883,7 @@ async fn build_plans(
 pub async fn cmd_plan(ctx: &Ctx, tables: Option<Vec<String>>) -> Result<()> {
     let (_src, db) = ctx.connect(1).await?;
     let live = introspect(&db, &ctx.cfg).await?;
-    let (_loads, plans) = build_plans(ctx, &db, &live, tables, false).await?;
+    let (_loads, plans) = build_plans(ctx, &db, &live, &IndexMap::new(), tables, false).await?;
 
     if ctx.json {
         let items: Vec<serde_json::Value> = plans
@@ -834,7 +921,12 @@ pub async fn cmd_load(
 
     let db = Db::connect_with(&src, 1).await?;
     let live = introspect(&db, &ctx.cfg).await?;
-    let (loads, plans) = build_plans(ctx, &db, &live, tables, force).await?;
+    let live_buckets = if no_buckets {
+        IndexMap::new()
+    } else {
+        live_bucket_settings(ctx, &src, buckets.as_deref()).await?
+    };
+    let (loads, plans) = build_plans(ctx, &db, &live, &live_buckets, tables, force).await?;
 
     if plans.is_empty() {
         ctx.say("nothing to load");
@@ -1153,7 +1245,7 @@ pub fn cmd_verify(ctx: &Ctx) -> Result<()> {
     // Buckets verify entirely offline: every object is re-hashed from disk and
     // compared with the manifest, and the manifest with the lock.
     let mut bucket_objects = 0u64;
-    for (name, entry) in &lock.buckets {
+    for (name, entry) in &lock.bucket_files {
         let dir = out_dir.join("buckets").join(name);
         match BucketExport::read(&dir) {
             Err(e) => problems.push(format!("bucket {name}: {e:#}")),
@@ -1219,7 +1311,7 @@ pub fn cmd_verify(ctx: &Ctx) -> Result<()> {
         ctx.say(format!(
             "verified {checked} table{}{} against {}",
             if checked == 1 { "" } else { "s" },
-            if lock.buckets.is_empty() {
+            if lock.bucket_files.is_empty() {
                 String::new()
             } else {
                 format!(
@@ -1386,7 +1478,7 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lock::drift::{Drift, Report, Severity};
+    use crate::lock::drift::{Drift, Report, Severity, Target};
 
     #[test]
     fn drift_json_reports_both_counts_and_every_item() {
@@ -1394,26 +1486,41 @@ mod tests {
             drifts: vec![
                 Drift {
                     severity: Severity::Breaking,
-                    table: TableId::new("public", "users"),
-                    column: Some("age".into()),
+                    target: Target::Column(TableId::new("public", "users"), "age".into()),
                     what: "int32 -> int16".into(),
                     note: "narrowing".into(),
                 },
                 Drift {
                     severity: Severity::Benign,
-                    table: TableId::new("public", "users"),
-                    column: None,
+                    target: Target::Table(TableId::new("public", "users")),
                     what: "table added".into(),
                     note: String::new(),
+                },
+                Drift {
+                    severity: Severity::Breaking,
+                    target: Target::Bucket("project_files".into()),
+                    what: "bucket does not exist".into(),
+                    note: "run your migrations".into(),
                 },
             ],
         };
         let parsed: serde_json::Value = serde_json::from_str(&drift_json(&report)).unwrap();
-        assert_eq!(parsed["breaking"], 1);
+        assert_eq!(parsed["breaking"], 2);
         assert_eq!(parsed["benign"], 1);
-        assert_eq!(parsed["drifts"].as_array().unwrap().len(), 2);
+        assert_eq!(parsed["drifts"].as_array().unwrap().len(), 3);
         assert_eq!(parsed["drifts"][0]["severity"], "breaking");
         assert_eq!(parsed["drifts"][0]["column"], "age");
-        assert_eq!(parsed["drifts"][1]["column"], serde_json::Value::Null);
+        assert_eq!(parsed["drifts"][0]["table"], "public.users");
+        assert_eq!(parsed["drifts"][0]["bucket"], serde_json::Value::Null);
+
+        // A bucket drift carries a bucket name and no table.
+        let bucket = parsed["drifts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["bucket"] == "project_files")
+            .expect("the bucket drift should be present");
+        assert_eq!(bucket["table"], serde_json::Value::Null);
+        assert_eq!(bucket["target"], "bucket project_files");
     }
 }

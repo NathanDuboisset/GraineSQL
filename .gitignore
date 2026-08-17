@@ -1,1 +1,22 @@
+# Rust build output
 /target
+**/*.rs.bk
+
+# Release packaging
+/dist
+
+# Credentials: seedle reads these, and none of them belong in git
+.env
+.env.*
+!.env.example
+
+# A project's own seed output is committed deliberately, but never this repo's
+# scratch runs
+/out-*
+/seed_data
+
+# Editors and OS noise
+.DS_Store
+*.swp
+.idea/
+.vscode/

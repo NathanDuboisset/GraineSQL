@@ -2,11 +2,11 @@
 # in the tap by hand.
 class Seedle < Formula
   desc "Deterministic, git-friendly database seed export and load"
-  homepage "https://github.com/Delos-Intelligence/seedle"
+  homepage "https://github.com/NathanDuboisset/seedle"
   version "@VERSION@"
   license any_of: ["MIT", "Apache-2.0"]
 
-  BASE = "https://github.com/Delos-Intelligence/seedle/releases/download/v@VERSION@".freeze
+  BASE = "https://github.com/NathanDuboisset/seedle/releases/download/v@VERSION@".freeze
 
   on_macos do
     if Hardware::CPU.arm?

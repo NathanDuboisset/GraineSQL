@@ -45,19 +45,25 @@ pub struct Lock {
     pub enums: IndexMap<String, Vec<String>>,
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub files: IndexMap<TableId, FileEntry>,
-    /// Storage buckets, keyed by bucket id. One hash per bucket covers every
-    /// object's bytes, name, and the bucket's own settings.
+    /// Storage bucket *settings*, keyed by bucket id.
+    ///
+    /// This is schema, not data: buckets are created and configured by
+    /// migrations, so seedle records them here only to check the target against
+    /// — it never creates or reconfigures one.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
-    pub buckets: IndexMap<String, BucketEntry>,
+    pub buckets: IndexMap<String, crate::storage::BucketSettings>,
+    /// Bucket contents, keyed by bucket id. The data counterpart to `files`.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub bucket_files: IndexMap<String, BucketEntry>,
 }
 
-/// A bucket's recorded state, for `seedle verify`.
+/// A bucket's recorded contents, for `seedle verify`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BucketEntry {
     pub objects: u64,
     pub bytes: u64,
-    /// Hex sha256 over the bucket's settings and manifest, which in turn hold
-    /// every object's own sha256.
+    /// Hex sha256 over the manifest, which in turn holds every object's own
+    /// sha256, path, and size.
     pub sha256: String,
 }
 
@@ -74,6 +80,7 @@ impl Lock {
             enums: schema.enums.clone(),
             files: IndexMap::new(),
             buckets: IndexMap::new(),
+            bucket_files: IndexMap::new(),
         };
         lock.fingerprint = fingerprint_schema(schema);
         lock

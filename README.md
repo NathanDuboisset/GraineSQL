@@ -27,12 +27,12 @@ matches what the files were written against.
 ## Install
 
 ```sh
-brew install Delos-Intelligence/tap/seedle   # macOS and Linux
+brew install nathanduboisset/tap/seedle   # macOS and Linux
 cargo binstall seedle                        # prebuilt binary, no compile
 cargo install seedle                         # from source
 ```
 
-Or download a binary from [Releases](https://github.com/Delos-Intelligence/seedle/releases);
+Or download a binary from [Releases](https://github.com/NathanDuboisset/seedle/releases);
 each archive ships a `.sha256` beside it.
 
 Building from source needs Rust 1.85+ (2024 edition). Runtime: Postgres 12+ or
