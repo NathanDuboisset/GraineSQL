@@ -64,7 +64,7 @@ jobs:
           NAME="seedle-v${VERSION}-${{ matrix.target }}"
           mkdir -p "dist/$NAME"
           cp "target/${{ matrix.target }}/release/seedle" "dist/$NAME/"
-          cp README.md LICENSE-MIT LICENSE-APACHE "dist/$NAME/" 2>/dev/null || true
+          cp README.md LICENSE "dist/$NAME/"
           tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"
           # A checksum users can verify before running the binary.
           (cd dist && shasum -a 256 "$NAME.tar.gz" > "$NAME.tar.gz.sha256")
@@ -77,7 +77,7 @@ jobs:
           NAME="seedle-v${VERSION}-${{ matrix.target }}"
           mkdir -p "dist/$NAME"
           cp "target/${{ matrix.target }}/release/seedle.exe" "dist/$NAME/"
-          cp README.md "dist/$NAME/"
+          cp README.md LICENSE "dist/$NAME/"
           (cd dist && 7z a "$NAME.zip" "$NAME" > /dev/null)
           (cd dist && certutil -hashfile "$NAME.zip" SHA256 | sed -n 2p > "$NAME.zip.sha256")
 

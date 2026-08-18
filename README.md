@@ -362,3 +362,18 @@ documented in `src/db/mysql.rs`, and the ones worth checking first are
   normally.
 - Postgres `numeric` NaN and exponent-form decimals are written as quoted strings
   in JSON, since neither survives a JSON number token unchanged.
+
+## Licence
+
+[PolyForm Noncommercial 1.0.0](LICENSE) — **source-available, not open source**.
+
+Use it freely for anything that is not for commercial advantage or monetary
+compensation: personal projects, research, education, evaluation. Using it in or
+for a business needs a separate licence; open an issue to ask.
+
+Practical consequences worth knowing:
+
+- `cargo install --git` and prebuilt binaries work as normal.
+- crates.io accepts a custom licence file, but the crate will not show an
+  OSI-approved licence, and some corporate policies auto-reject that.
+- Homebrew *core* will not accept a non-OSI formula; the personal tap is fine.

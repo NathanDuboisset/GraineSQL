@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Deterministic, git-friendly database seed export and load for Postgres and MySQL"
-license = "MIT OR Apache-2.0"
+# Not an SPDX identifier, so crates.io needs the file itself. PolyForm
+# Noncommercial is source-available, not open source: commercial use needs a
+# separate licence from the copyright holder.
+license-file = "LICENSE"
 repository = "https://github.com/NathanDuboisset/seedle"
 homepage = "https://github.com/NathanDuboisset/seedle"
 documentation = "https://docs.rs/seedle"
