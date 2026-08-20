@@ -253,12 +253,12 @@ pub async fn load_table(
 ///
 /// Postgres only: `setval` is an ordinary function call, so it composes into one
 /// self-contained statement that runs inside the transaction. MySQL needs a
-/// read-then-ALTER pair instead — see [`mysql_fixups`].
+/// read-then-ALTER pair instead, see [`mysql_fixups`].
 ///
-/// Without this the application's next insert collides with a seed row — the
+/// Without this the application's next insert collides with a seed row, the
 /// classic seed-tool footgun.
 pub fn sequence_fixups(engine: Engine, table: &Table) -> Vec<String> {
-    if engine != Engine::Postgres {
+    if engine.dialect() != Engine::Postgres {
         return Vec::new();
     }
     table
@@ -270,7 +270,7 @@ pub fn sequence_fixups(engine: Engine, table: &Table) -> Vec<String> {
 /// Columns whose MySQL `AUTO_INCREMENT` needs resetting after a load.
 ///
 /// MySQL cannot parameterise or subquery an `AUTO_INCREMENT` assignment, so the
-/// value has to be read first and substituted into DDL — and `ALTER TABLE`
+/// value has to be read first and substituted into DDL, and `ALTER TABLE`
 /// performs an implicit commit, so the whole pair has to run after the load's
 /// transaction rather than inside it.
 pub fn mysql_fixups(table: &Table) -> Vec<(TableId, String)> {
@@ -305,29 +305,27 @@ pub async fn fix_mysql_auto_increment(
 pub fn fixup_after_commit(engine: Engine) -> bool {
     // `ALTER TABLE` implicitly commits on MySQL, which would silently split the
     // load into two transactions.
-    matches!(engine, Engine::Mysql)
+    matches!(engine.dialect(), Engine::Mysql)
 }
 
 /// Session statements needed to load a set of tables whose foreign keys form a
 /// cycle, or `None` when the engine cannot do it.
 pub fn defer_constraints(engine: Engine, all_deferrable: bool) -> Option<&'static str> {
-    match engine {
+    match engine.dialect() {
         // Only DEFERRABLE constraints can actually be deferred; Postgres errors
         // otherwise rather than silently ignoring the request.
-        Engine::Postgres if all_deferrable => Some("SET CONSTRAINTS ALL DEFERRED"),
-        Engine::Postgres => None,
-        // MySQL's switch is transaction-scoped and works regardless.
         Engine::Mysql => Some("SET FOREIGN_KEY_CHECKS = 0"),
+        _ if all_deferrable => Some("SET CONSTRAINTS ALL DEFERRED"),
+        _ => None,
     }
 }
 
 /// Restore the constraint setting after a load, when one was changed.
 pub fn restore_constraints(engine: Engine) -> Option<&'static str> {
-    match engine {
+    match engine.dialect() {
         Engine::Mysql => Some("SET FOREIGN_KEY_CHECKS = 1"),
-        // Deferred constraints are checked at commit and the setting dies with
-        // the transaction, so there is nothing to undo.
-        Engine::Postgres => None,
+        // Deferred constraints die with the transaction.
+        _ => None,
     }
 }
 
@@ -421,7 +419,7 @@ mod tests {
     use crate::schema::TypeClass;
 
     /// `sql_type` mirrors what `format_type()` reports, since that is what the
-    /// write path casts to — it is not the same string as the class label.
+    /// write path casts to, it is not the same string as the class label.
     fn col(name: &str, sql_type: &str, class: TypeClass) -> Column {
         Column {
             name: name.into(),

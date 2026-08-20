@@ -1,17 +1,11 @@
 //! MySQL schema introspection via `information_schema`.
 //!
-//! Implemented after the Postgres path so the shared model was shaped by a real
-//! engine rather than guessed at. The SQL-generation half lives in
-//! [`crate::dialect::Mysql`].
+//! Where MySQL differs in ways that matter:
 //!
-//! Where MySQL differs from Postgres in ways that matter here:
-//!
-//! - There is no boolean type. `BOOLEAN` is an alias for `TINYINT(1)`, so the
-//!   display width is the only signal, and it is a convention rather than a
-//!   guarantee.
-//! - `BIGINT UNSIGNED` exceeds `i64`, so it is carried as an exact decimal
-//!   rather than an integer that would overflow.
-//! - Enums have no named type; the labels live inline in the column definition.
+//! - No boolean type. `BOOLEAN` is `TINYINT(1)`, so display width is the only
+//!   signal, and it is a convention rather than a guarantee.
+//! - `BIGINT UNSIGNED` exceeds `i64`, so it is carried as an exact decimal.
+//! - Enums have no named type; labels live inline in the column definition.
 //! - Foreign keys are never deferrable.
 
 use std::collections::BTreeSet;
@@ -362,7 +356,7 @@ pub fn classify(
         "time" => TypeClass::Time { tz: false },
         "datetime" => TypeClass::Timestamp { tz: false },
         // TIMESTAMP is stored as UTC and converted for the session, so it is the
-        // zone-aware one of the pair — the opposite of what the names suggest.
+        // zone-aware one of the pair, the opposite of what the names suggest.
         "timestamp" => TypeClass::Timestamp { tz: true },
 
         // Keyed by the column that declares them, since there is no named type.
@@ -523,7 +517,7 @@ mod tests {
     #[test]
     fn enums_are_keyed_by_their_declaration() {
         // There is no named enum type to key on, so the declaration itself is
-        // the identity — which also means changing the labels changes the key,
+        // the identity, which also means changing the labels changes the key,
         // and drift reports it.
         let class = c("enum", "enum('free','pro')");
         assert_eq!(

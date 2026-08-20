@@ -3,8 +3,8 @@
 //! The split that matters: *breaking* drift would reject or corrupt data, so it
 //! aborts before anything is touched; *benign* drift cannot, so it warns and
 //! lets the command proceed. Getting a change into the wrong bucket is the worst
-//! failure mode this tool has — a false benign lets a bad load through, a false
-//! breaking blocks work for no reason — so every rule below has a test.
+//! failure mode this tool has, a false benign lets a bad load through, a false
+//! breaking blocks work for no reason, so every rule below has a test.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -18,7 +18,9 @@ use crate::storage::BucketSettings;
 pub enum Severity {
     /// Would reject or corrupt data. Abort.
     Breaking,
-    /// Cannot affect a load of the existing seed files. Warn and continue.
+    /// Loses data that the seed files carry, but succeeds. Needs confirmation.
+    Confirm,
+    /// Cannot affect a load of the existing seed files. Proceed.
     Benign,
 }
 
@@ -26,6 +28,7 @@ impl Severity {
     pub fn label(self) -> &'static str {
         match self {
             Severity::Breaking => "breaking",
+            Severity::Confirm => "needs confirmation",
             Severity::Benign => "benign",
         }
     }
@@ -37,7 +40,7 @@ pub enum Target {
     Table(TableId),
     Column(TableId, String),
     /// A storage bucket. Buckets are created by migrations, so seedle only ever
-    /// checks them — it never creates or reconfigures one.
+    /// checks them, it never creates or reconfigures one.
     Bucket(String),
 }
 
@@ -105,6 +108,16 @@ impl Report {
             .filter(|d| d.severity == Severity::Breaking)
     }
 
+    pub fn confirm(&self) -> impl Iterator<Item = &Drift> {
+        self.drifts
+            .iter()
+            .filter(|d| d.severity == Severity::Confirm)
+    }
+
+    pub fn needs_confirmation(&self) -> bool {
+        self.confirm().next().is_some()
+    }
+
     pub fn benign(&self) -> impl Iterator<Item = &Drift> {
         self.drifts
             .iter()
@@ -119,8 +132,13 @@ impl Report {
         self.drifts.is_empty()
     }
 
-    pub fn counts(&self) -> (usize, usize) {
-        (self.breaking().count(), self.benign().count())
+    /// (breaking, needs confirmation, benign)
+    pub fn counts(&self) -> (usize, usize, usize) {
+        (
+            self.breaking().count(),
+            self.confirm().count(),
+            self.benign().count(),
+        )
     }
 
     /// Human-readable report, aligned into columns.
@@ -137,7 +155,7 @@ impl Report {
             .unwrap_or(0)
             .min(48);
 
-        for severity in [Severity::Breaking, Severity::Benign] {
+        for severity in [Severity::Breaking, Severity::Confirm, Severity::Benign] {
             let group: Vec<&Drift> = self
                 .drifts
                 .iter()
@@ -160,9 +178,9 @@ impl Report {
             }
         }
 
-        let (breaking, benign) = self.counts();
+        let (breaking, confirm, benign) = self.counts();
         out.push_str(&format!(
-            "\n{breaking} breaking, {benign} benign.{}\n",
+            "\n{breaking} breaking, {confirm} needing confirmation, {benign} benign.{}\n",
             if breaking > 0 {
                 " Review, then re-run `seedle lock` to accept."
             } else {
@@ -183,10 +201,10 @@ pub fn classify(locked: &Schema, live: &Schema) -> Report {
     for (id, locked_table) in &locked.tables {
         match live.get(id) {
             None => drifts.push(Drift {
-                severity: Severity::Breaking,
+                severity: Severity::Confirm,
                 target: Target::Table(id.clone()),
                 what: "table dropped".into(),
-                note: "the seed files for it have nowhere to load".into(),
+                note: "its seed rows will be discarded".into(),
             }),
             Some(live_table) => {
                 compare_table(id, locked_table, live_table, &mut drifts);
@@ -225,10 +243,12 @@ fn compare_table(id: &TableId, locked: &Table, live: &Table, out: &mut Vec<Drift
     for lc in &locked.columns {
         match live.column(&lc.name) {
             None => out.push(Drift {
-                severity: Severity::Breaking,
+                // The load still succeeds, it just silently stops carrying this
+                // column's data. That is a judgement call, not an error.
+                severity: Severity::Confirm,
                 target: Target::Column(id.clone(), lc.name.clone()),
                 what: format!("column dropped (was {})", lc.class.label()),
-                note: "the seed files carry a value for it".into(),
+                note: "the seed files carry data for it, which will be discarded".into(),
             }),
             Some(vc) => compare_column(id, lc, vc, out),
         }
@@ -478,7 +498,7 @@ fn enum_owner(schema: &Schema, name: &str) -> TableId {
 /// Compare locked bucket settings against the live ones.
 ///
 /// Buckets are created and configured by migrations, so seedle never writes
-/// these — it only reports when they no longer match what the seed files were
+/// these, it only reports when they no longer match what the seed files were
 /// exported against. The question each rule answers is the same as for tables:
 /// would this make the existing objects fail to load?
 pub fn classify_buckets(
@@ -662,21 +682,27 @@ mod tests {
     // -- breaking -----------------------------------------------------------
 
     #[test]
-    fn dropped_table_is_breaking() {
+    fn a_dropped_table_needs_confirmation_rather_than_aborting() {
+        // The load still works; it just stops carrying that table's rows.
         let r = drift_from(|s| {
             s.tables.shift_remove(&TableId::new("public", "users"));
         });
-        assert_eq!(only(&r).severity, Severity::Breaking);
+        assert_eq!(only(&r).severity, Severity::Confirm);
         assert!(only(&r).what.contains("table dropped"));
+        assert!(!r.has_breaking());
+        assert!(r.needs_confirmation());
     }
 
     #[test]
-    fn dropped_column_is_breaking() {
+    fn a_dropped_column_needs_confirmation_rather_than_aborting() {
+        // Its data is discarded, which is a judgement call, not an error.
         let r = drift_from(|s| {
             users(s).columns.retain(|c| c.name != "age");
         });
-        assert_eq!(only(&r).severity, Severity::Breaking);
+        assert_eq!(only(&r).severity, Severity::Confirm);
         assert_eq!(only(&r).target.column(), Some("age"));
+        assert!(only(&r).note.contains("discarded"));
+        assert!(!r.has_breaking());
     }
 
     #[test]
@@ -952,21 +978,27 @@ mod tests {
     // -- reporting ----------------------------------------------------------
 
     #[test]
-    fn report_lists_breaking_before_benign_and_counts_both() {
+    fn report_groups_by_severity_worst_first_and_counts_each() {
         let r = drift_from(|s| {
             users(s).columns[2].class = TypeClass::Int { bits: 16 }; // breaking
+            users(s).columns.retain(|c| c.name != "email"); // needs confirmation
             users(s)
                 .columns
                 .push(col("phone", TypeClass::Text { max_len: None })); // benign
         });
-        assert_eq!(r.counts(), (1, 1));
+        assert_eq!(r.counts(), (1, 1, 1));
         assert!(r.has_breaking());
+        assert!(r.needs_confirmation());
 
         let text = r.render();
         let b = text.find("breaking:").unwrap();
+        let c = text.find("needs confirmation:").unwrap();
         let g = text.find("benign:").unwrap();
-        assert!(b < g, "breaking must come first:\n{text}");
-        assert!(text.contains("1 breaking, 1 benign"), "{text}");
+        assert!(b < c && c < g, "worst must come first:\n{text}");
+        assert!(
+            text.contains("1 breaking, 1 needing confirmation, 1 benign"),
+            "{text}"
+        );
         assert!(
             text.contains("seedle lock"),
             "the fix must be named:\n{text}"

@@ -15,7 +15,7 @@ const SYSTEM_SCHEMAS: &str = "('pg_catalog', 'information_schema', 'pg_toast')";
 /// come out in physical order.
 ///
 /// `format_type` is used for `sql_type` because its output is directly usable as
-/// a cast target, including any needed quoting — which is exactly what the write
+/// a cast target, including any needed quoting, which is exactly what the write
 /// path needs.
 const COLUMNS_SQL: &str = "
 SELECT n.nspname                                        AS schema_name,
@@ -258,7 +258,7 @@ pub async fn list_tables(db: &Db) -> Result<Vec<TableId>> {
 /// Advance the sequence behind an identity/serial column past the loaded rows.
 ///
 /// Without this the next application insert reuses a key that a seed row already
-/// took — the classic seed-tool footgun.
+/// took, the classic seed-tool footgun.
 pub fn fix_sequence_sql(id: &TableId, column: &str) -> String {
     // `is_called = false` means the next `nextval` returns exactly this value,
     // so an empty table correctly resets to 1.
@@ -343,7 +343,7 @@ impl<'a> Fields<'a> {
 ///
 /// `sql_type` is `format_type()` output (`character varying(50)`,
 /// `numeric(10,2)`, `integer[]`). `typtype` is the `pg_type.typtype` code, which
-/// is how enums are recognised — their name carries no marker.
+/// is how enums are recognised, their name carries no marker.
 pub fn classify(
     sql_type: &str,
     typtype: &str,

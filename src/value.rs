@@ -1,14 +1,13 @@
-//! Canonical value model — the fidelity core.
+//! Canonical value model.
 //!
-//! Every column is read out of the database as *text* over a session pinned to
-//! deterministic output settings (UTC, ISO intervals, hex bytea), parsed into a
-//! [`Value`] according to the column's [`TypeClass`], and re-emitted in a
-//! canonical form. Writing runs the same path in reverse.
+//! Every column is read as text over a session pinned to deterministic output
+//! settings (UTC, ISO intervals, hex bytea), parsed per the column's
+//! [`TypeClass`], and re-emitted canonically. Writing runs the same path in
+//! reverse.
 //!
-//! The invariant the tests enforce: for every type,
-//! `parse(class, encode(v)) == v` and `encode(parse(class, s)) == canonical(s)`.
-//! Export and load must be exact inverses or committed seed files drift on their
-//! own, which defeats the entire point of the tool.
+//! The invariant the tests enforce: `parse(class, encode(v)) == v` for every
+//! type. Export and load must be exact inverses, or committed files drift on
+//! their own.
 
 use std::fmt::Write as _;
 
@@ -28,7 +27,7 @@ pub enum Value {
     Int(i64),
     Float(f64),
     /// Exact decimal, held as its canonical digit string. Never routed through
-    /// `f64` — that would silently corrupt money columns.
+    /// `f64`, that would silently corrupt money columns.
     Decimal(String),
     Text(String),
     Bytes(Vec<u8>),
@@ -97,7 +96,7 @@ impl Value {
     /// Canonical single-line text form.
     ///
     /// Used for CSV fields, per-row filename slugs, and as the bind text handed
-    /// back to the database. Never quoted or escaped — that is the caller's job.
+    /// back to the database. Never quoted or escaped, that is the caller's job.
     pub fn to_text(&self) -> Option<String> {
         Some(match self {
             Value::Null => return None,
@@ -280,7 +279,7 @@ fn parse_dt_tz(s: &str) -> Result<DateTime<Utc>> {
     let (naive_part, offset) = strip_offset(t);
     let naive = parse_naive_dt(naive_part)?;
     let Some(offset) = offset else {
-        // No offset at all — the session is pinned to UTC, so read it as UTC.
+        // No offset at all, the session is pinned to UTC, so read it as UTC.
         return Ok(DateTime::from_naive_utc_and_offset(naive, Utc));
     };
     let seconds = parse_offset_seconds(offset)
@@ -409,7 +408,7 @@ fn truncate(s: &str, max: usize) -> String {
         return s.to_string();
     }
     let head: String = s.chars().take(max).collect();
-    format!("{head}…")
+    format!("{head}...")
 }
 
 #[cfg(test)]
@@ -525,7 +524,7 @@ mod tests {
         for bad in ["", "1.2.3", "abc", "1e", "--1", "0x10", "1;DROP TABLE t"] {
             assert!(
                 Value::parse(&c, Some(bad)).is_err(),
-                "{bad:?} should be rejected — decimals are spliced into SQL literals"
+                "{bad:?} should be rejected, decimals are spliced into SQL literals"
             );
         }
     }

@@ -81,8 +81,8 @@ impl Missing {
 
         for missing in &self.wanted {
             match self.closest(&missing.name) {
-                Some(hit) => out.push_str(&format!("  {missing}  — did you mean {hit}?\n")),
-                None => out.push_str(&format!("  {missing}  — no similar table name\n")),
+                Some(hit) => out.push_str(&format!("  {missing} , did you mean {hit}?\n")),
+                None => out.push_str(&format!("  {missing} , no similar table name\n")),
             }
         }
         out.push_str(&format!(
@@ -111,7 +111,7 @@ impl Missing {
 /// describing the tables that constrain load order.
 ///
 /// Tables the database does not have are reported rather than raised: when a
-/// lock knows the table, its absence is *drift* — a dropped table — and belongs
+/// lock knows the table, its absence is *drift*, a dropped table, and belongs
 /// in the drift report with everything else. Only a caller with no lock to
 /// compare against treats it as a plain error.
 pub fn prune(schema: &Schema, wanted: &[TableId]) -> Result<(Schema, Option<Missing>)> {
@@ -203,8 +203,8 @@ impl Db {
         let setup: &'static [&'static str] = dialect.session_setup();
         let max_conns = max_conns.max(1);
 
-        let pool = match src.engine {
-            Engine::Postgres => Pool::Pg(
+        let pool = match src.engine.dialect() {
+            Engine::Postgres | Engine::Supabase => Pool::Pg(
                 PgPoolOptions::new()
                     .max_connections(max_conns)
                     .after_connect(move |conn, _| {
@@ -265,11 +265,7 @@ impl Db {
 
     /// Round-trip check, used by `seedle sources`.
     pub async fn ping(&self) -> Result<String> {
-        let sql = match self.engine() {
-            Engine::Postgres => "SELECT version()",
-            Engine::Mysql => "SELECT version()",
-        };
-        let rows = self.query_text(sql).await?;
+        let rows = self.query_text("SELECT version()").await?;
         Ok(rows
             .first()
             .and_then(|r| r.first().cloned().flatten())
@@ -452,7 +448,7 @@ fn failed_sql(sql: &str) -> String {
     if sql.len() <= MAX {
         format!("running: {sql}")
     } else {
-        format!("running: {}… ({} bytes total)", &sql[..MAX], sql.len())
+        format!("running: {}... ({} bytes total)", &sql[..MAX], sql.len())
     }
 }
 

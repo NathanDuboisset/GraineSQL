@@ -53,12 +53,6 @@ const BREAKING: &[(&str, &str, &str)] = &[
         "varchar(5)",
     ),
     (
-        "dropped column",
-        "ALTER TABLE employees DROP COLUMN name",
-        "column dropped",
-    ),
-    ("dropped table", "DROP TABLE orders", "table dropped"),
-    (
         "new NOT NULL column with no default",
         "ALTER TABLE countries ADD COLUMN region text NOT NULL DEFAULT 'x'; \
          ALTER TABLE countries ALTER COLUMN region DROP DEFAULT",
@@ -159,6 +153,41 @@ fn breaking_drift_aborts_every_data_command() {
     }
 }
 
+/// Data loss rather than a failed load: the command asks instead of aborting.
+const CONFIRM: &[(&str, &str, &str)] = &[
+    (
+        "dropped column",
+        "ALTER TABLE employees DROP COLUMN name",
+        "column dropped",
+    ),
+    ("dropped table", "DROP TABLE orders", "table dropped"),
+];
+
+#[test]
+fn data_losing_drift_asks_rather_than_aborting() {
+    let base = require_pg!();
+    for (i, (label, sql, expected)) in CONFIRM.iter().enumerate() {
+        let f = prepared(&format!("confirm{i}"), &base);
+        f.sql_src(sql)
+            .unwrap_or_else(|e| panic!("applying {label:?} to src: {e}"));
+        f.sql_dst(sql)
+            .unwrap_or_else(|e| panic!("applying {label:?} to dst: {e}"));
+
+        let d = f.ok(&["diff"]);
+        d.says("needs confirmation");
+        d.says(expected);
+        d.does_not_say("breaking:");
+
+        // With no terminal to prompt on, the command refuses rather than
+        // guessing which answer the user wanted.
+        let refused = f.fail(&["export"]);
+        refused.says("--yes");
+
+        // And --yes accepts it.
+        f.ok(&["export", "--yes", "-q"]);
+    }
+}
+
 #[test]
 fn force_proceeds_past_breaking_drift_but_says_so() {
     let base = require_pg!();
@@ -180,7 +209,7 @@ fn relocking_accepts_the_change_and_unblocks_the_command() {
     let f = prepared("relock", &base);
     f.sql_src("ALTER TABLE employees DROP COLUMN name").unwrap();
 
-    f.fail(&["export"]).says("seedle lock");
+    f.fail(&["export"]).says("--yes");
     f.ok(&["lock"]).says("column dropped");
     f.ok(&["export", "-q"]);
     f.ok(&["diff"]).says("schema matches");
@@ -300,7 +329,7 @@ fn a_null_in_a_now_not_null_column_is_caught_before_writing() {
     let f = prepared("nullcheck", &base);
 
     // Add the column with a default so the drift is only benign, then let a seed
-    // row carry an explicit null for it — which no schema comparison can see.
+    // row carry an explicit null for it, which no schema comparison can see.
     f.sql_src("ALTER TABLE users ADD COLUMN nickname text")
         .unwrap();
     f.sql_dst("ALTER TABLE users ADD COLUMN nickname text")

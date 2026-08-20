@@ -1,4 +1,4 @@
-//! `seedle.lock` — the committed snapshot of the schema the seed files were
+//! `seedle.lock`, the committed snapshot of the schema the seed files were
 //! written against.
 //!
 //! Three sections, kept deliberately separate so schema drift and data drift are
@@ -47,9 +47,8 @@ pub struct Lock {
     pub files: IndexMap<TableId, FileEntry>,
     /// Storage bucket *settings*, keyed by bucket id.
     ///
-    /// This is schema, not data: buckets are created and configured by
-    /// migrations, so seedle records them here only to check the target against
-    /// — it never creates or reconfigures one.
+    /// Schema, not data: buckets are created by migrations. seedle records them
+    /// to check the target against and never writes them.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub buckets: IndexMap<String, crate::storage::BucketSettings>,
     /// Bucket contents, keyed by bucket id. The data counterpart to `files`.
@@ -135,11 +134,9 @@ impl Lock {
     /// Reorder `live`'s columns to match this lock, so the physical column
     /// order of a particular database cannot leak into the output.
     ///
-    /// Two databases that hold the same columns in a different physical order —
-    /// which is what happens as soon as one of them has had a column added and
-    /// re-added — must still export byte-identical files. The lock is the
-    /// authority; columns it does not know about are appended in live order so
-    /// a newly added column is still exported.
+    /// Two databases holding the same columns in a different physical order must
+    /// still export identically. Columns the lock does not know about are
+    /// appended in live order, so a newly added one is still exported.
     pub fn align_column_order(&self, live: &mut Schema) {
         for (id, table) in live.tables.iter_mut() {
             let Some(locked) = self.schema.get(id) else {
@@ -233,7 +230,7 @@ fn short_hash(hex: &str) -> String {
     format!("b3:{}", &hex[..16])
 }
 
-/// Hex sha256 of a byte slice — the file-content hash the lock records.
+/// Hex sha256 of a byte slice, the file-content hash the lock records.
 ///
 /// sha256 rather than blake3 here so a user can verify a seed file with the
 /// `sha256sum` already on their machine.

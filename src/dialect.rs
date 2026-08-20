@@ -1,7 +1,7 @@
 //! Per-engine SQL generation.
 //!
 //! Everything in this module is synchronous and pure, so the quoting, escaping,
-//! and clause-building rules — the parts most likely to be subtly wrong — are
+//! and clause-building rules, the parts most likely to be subtly wrong, are
 //! unit-testable without a database.
 
 use std::fmt::Write as _;
@@ -75,9 +75,9 @@ pub trait Dialect: Send + Sync {
 }
 
 pub fn for_engine(engine: Engine) -> Box<dyn Dialect> {
-    match engine {
-        Engine::Postgres => Box::new(Postgres),
+    match engine.dialect() {
         Engine::Mysql => Box::new(Mysql),
+        _ => Box::new(Postgres),
     }
 }
 
@@ -135,7 +135,7 @@ impl Dialect for Postgres {
     }
 
     fn bind_text(&self, _col: &Column, v: &Value) -> Result<Option<String>> {
-        // Postgres accepts our canonical text for every type verbatim: `\x…`
+        // Postgres accepts our canonical text for every type verbatim: `\x...`
         // is its hex bytea input format, `true`/`false` are valid booleans, and
         // ISO timestamps parse unambiguously.
         Ok(v.to_text())
@@ -148,7 +148,7 @@ impl Dialect for Postgres {
             Value::Int(i) => i.to_string(),
             Value::Decimal(d) if is_bare_numeric_literal(d) => d.clone(),
             // Postgres `numeric` accepts NaN, but `NaN` is not a numeric
-            // literal — it has to be quoted and cast like a non-finite float.
+            // literal, it has to be quoted and cast like a non-finite float.
             Value::Decimal(d) => format!("{}::{}", pg_quote(d), col.sql_type),
             Value::Float(f) if f.is_finite() => crate::value::format_float(*f),
             // NaN and the infinities are valid Postgres floats but are not
@@ -387,7 +387,7 @@ impl Dialect for Mysql {
 /// Single-quoted MySQL string literal.
 ///
 /// MySQL treats backslash as an escape character in string literals (unless
-/// `NO_BACKSLASH_ESCAPES` is set), so every backslash must be doubled — the
+/// `NO_BACKSLASH_ESCAPES` is set), so every backslash must be doubled, the
 /// opposite of the Postgres rule.
 fn mysql_quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);

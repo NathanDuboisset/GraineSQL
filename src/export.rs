@@ -1,5 +1,6 @@
 //! Pulling rows out of a source database into seed files.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -17,6 +18,155 @@ pub struct TableExport {
     pub table: crate::schema::TableId,
     pub rows: u64,
     pub files: Vec<format::Output>,
+    /// Value tuples seen for selected column sets, for the referential check.
+    pub keys: KeyIndex,
+}
+
+/// Value tuples observed per column set, keyed by the column names.
+pub type KeyIndex = BTreeMap<Vec<String>, BTreeSet<Vec<String>>>;
+
+/// A foreign key whose parent rows are not all present in the export.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dangling {
+    pub child: crate::schema::TableId,
+    pub columns: Vec<String>,
+    pub parent: crate::schema::TableId,
+    pub ref_columns: Vec<String>,
+    /// Whether the parent table is exported at all.
+    pub parent_exported: bool,
+    pub missing: usize,
+    /// A few offending values, for the message.
+    pub examples: Vec<String>,
+}
+
+/// Column sets whose values must be captured while exporting `table`.
+///
+/// Two reasons to capture a set: it is the source of a foreign key, or it is the
+/// target of one.
+pub fn columns_to_index(
+    schema: &Schema,
+    exported: &[crate::schema::TableId],
+) -> BTreeMap<crate::schema::TableId, Vec<Vec<String>>> {
+    let mut out: BTreeMap<crate::schema::TableId, Vec<Vec<String>>> = BTreeMap::new();
+    for id in exported {
+        let Some(table) = schema.get(id) else {
+            continue;
+        };
+        for fk in &table.foreign_keys {
+            out.entry(id.clone()).or_default().push(fk.columns.clone());
+            if let Some(parent) = schema.resolve(&fk.references) {
+                out.entry(parent).or_default().push(fk.ref_columns.clone());
+            }
+        }
+    }
+    for sets in out.values_mut() {
+        sets.sort();
+        sets.dedup();
+    }
+    out
+}
+
+/// Check that every foreign key in the export can be satisfied by the export.
+///
+/// This is the difference between a set of filters and a loadable slice. A
+/// `where` clause on one table can orphan rows in another, and the failure only
+/// shows up much later as a foreign-key violation partway through a load.
+pub fn check_referential_closure(
+    schema: &Schema,
+    exports: &BTreeMap<crate::schema::TableId, TableExport>,
+) -> Vec<Dangling> {
+    let mut out = Vec::new();
+
+    for (id, export) in exports {
+        let Some(table) = schema.get(id) else {
+            continue;
+        };
+        for fk in &table.foreign_keys {
+            let Some(child_values) = export.keys.get(&fk.columns) else {
+                continue;
+            };
+            if child_values.is_empty() {
+                continue;
+            }
+            let parent_id = schema
+                .resolve(&fk.references)
+                .unwrap_or(fk.references.clone());
+
+            // A self-reference is satisfied within the table's own rows.
+            let parent_values = if parent_id == *id {
+                export.keys.get(&fk.ref_columns)
+            } else {
+                exports
+                    .get(&parent_id)
+                    .and_then(|e| e.keys.get(&fk.ref_columns))
+            };
+
+            match parent_values {
+                None => out.push(Dangling {
+                    child: id.clone(),
+                    columns: fk.columns.clone(),
+                    parent_exported: exports.contains_key(&parent_id),
+                    parent: parent_id,
+                    ref_columns: fk.ref_columns.clone(),
+                    missing: child_values.len(),
+                    examples: child_values.iter().take(3).map(|v| v.join(", ")).collect(),
+                }),
+                Some(parent_values) => {
+                    let missing: Vec<&Vec<String>> =
+                        child_values.difference(parent_values).collect();
+                    if !missing.is_empty() {
+                        out.push(Dangling {
+                            child: id.clone(),
+                            columns: fk.columns.clone(),
+                            parent: parent_id,
+                            ref_columns: fk.ref_columns.clone(),
+                            parent_exported: true,
+                            missing: missing.len(),
+                            examples: missing.iter().take(3).map(|v| v.join(", ")).collect(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    out.sort_by(|a, b| (&a.child, &a.columns).cmp(&(&b.child, &b.columns)));
+    out
+}
+
+/// Render dangling references as an actionable error.
+pub fn render_dangling(items: &[Dangling]) -> String {
+    let mut out = String::from("the export is not referentially complete:\n");
+    for d in items {
+        out.push_str(&format!(
+            "  {}({}) -> {}({}): {} value{} with no matching row\n",
+            d.child,
+            d.columns.join(", "),
+            d.parent,
+            d.ref_columns.join(", "),
+            d.missing,
+            if d.missing == 1 { "" } else { "s" }
+        ));
+        if !d.examples.is_empty() {
+            out.push_str(&format!("    e.g. {}\n", d.examples.join("; ")));
+        }
+        if !d.parent_exported {
+            out.push_str(&format!(
+                "    {} is not in the `tables:` list; add it\n",
+                d.parent
+            ));
+        } else {
+            out.push_str(&format!(
+                "    widen the filter on {}, or narrow the one on {}\n",
+                d.parent, d.child
+            ));
+        }
+    }
+    out.push_str(
+        "\nLoading this into an empty database would fail partway through. \
+         Fix seedle.yaml, or pass --no-fk-check to export anyway.\n",
+    );
+    out
 }
 
 /// Columns of `table` that `cfg` selects, in the schema's column order.
@@ -167,7 +317,7 @@ pub fn build_query(
 }
 
 /// The ordering columns: the configured ones first, then the primary key, then
-/// every remaining exported column — deduped, so the result is a total order.
+/// every remaining exported column, deduped, so the result is a total order.
 ///
 /// Appending the rest is what guarantees determinism: ordering by a non-unique
 /// column alone leaves ties, and ties are resolved differently run to run.
@@ -208,6 +358,7 @@ pub async fn export_table(
     schema: &Schema,
     cfg: &ResolvedTable,
     sql_batch: usize,
+    index: &[Vec<String>],
 ) -> Result<TableExport> {
     let id = schema.resolve(&cfg.id).unwrap_or_else(|| cfg.id.clone());
     let table = schema
@@ -226,6 +377,22 @@ pub async fn export_table(
         &schema.default_schema,
         sql_batch,
     )?;
+
+    // Positions of the column sets whose values the referential check needs.
+    let index: Vec<(Vec<String>, Vec<usize>)> = index
+        .iter()
+        .filter_map(|names| {
+            let positions: Vec<usize> = names
+                .iter()
+                .filter_map(|n| columns.iter().position(|c| c.name == *n))
+                .collect();
+            (positions.len() == names.len()).then_some((names.clone(), positions))
+        })
+        .collect();
+    let mut keys: KeyIndex = index
+        .iter()
+        .map(|(names, _)| (names.clone(), BTreeSet::new()))
+        .collect();
 
     let mut rows = 0u64;
     let mut decode_error = None;
@@ -254,6 +421,15 @@ pub async fn export_table(
                 return Ok(());
             }
         };
+        for (names, positions) in &index {
+            // A null anywhere in the tuple means the reference is absent, not
+            // dangling, so it is not recorded.
+            let tuple: Option<Vec<String>> =
+                positions.iter().map(|p| values[*p].to_text()).collect();
+            if let Some(t) = tuple {
+                keys.get_mut(names).expect("seeded above").insert(t);
+            }
+        }
         writer.write_row(&values)?;
         rows += 1;
         Ok(())
@@ -269,6 +445,7 @@ pub async fn export_table(
         table: id,
         rows,
         files: writer.finish()?,
+        keys,
     })
 }
 
@@ -569,6 +746,7 @@ mod tests {
             table: TableId::bare("t"),
             rows: 0,
             files,
+            keys: KeyIndex::new(),
         };
         let a = format::Output {
             path: "t/a.json".into(),
@@ -607,6 +785,7 @@ mod tests {
                 path: "users/1.json".into(),
                 bytes: vec![],
             }],
+            keys: KeyIndex::new(),
         };
         assert_eq!(lock_path(&e, &c, "public"), "users/");
 
@@ -618,6 +797,7 @@ mod tests {
                 path: "users.jsonl".into(),
                 bytes: vec![],
             }],
+            keys: KeyIndex::new(),
         };
         assert_eq!(lock_path(&e, &c, "public"), "users.jsonl");
     }
@@ -630,6 +810,7 @@ mod tests {
             table: c.id.clone(),
             rows: 0,
             files: vec![],
+            keys: KeyIndex::new(),
         };
         assert_eq!(lock_path(&e, &c, "public"), "audit.events");
     }

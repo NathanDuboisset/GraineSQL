@@ -1,7 +1,7 @@
 //! Canonical JSON encoding and decoding for rows.
 //!
 //! Hand-rolled rather than delegated to `serde_json::to_string` so that number
-//! formatting, key order, and escaping are all decided here — every one of them
+//! formatting, key order, and escaping are all decided here, every one of them
 //! is a determinism requirement, and a serializer that "helpfully" normalises a
 //! decimal would silently corrupt money columns.
 
@@ -18,7 +18,7 @@ use crate::value::Value;
 
 /// Encode one row as a JSON object.
 ///
-/// Keys are emitted in `columns` order, which is the lock's column order — never
+/// Keys are emitted in `columns` order, which is the lock's column order, never
 /// map iteration order.
 pub fn encode_row(
     out: &mut String,
@@ -65,8 +65,8 @@ fn encode_value(
         Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
         Value::Int(i) => out.push_str(&i.to_string()),
         // A decimal is emitted as a bare JSON number token holding its exact
-        // source digits, trailing zeros and all. Routing it through f64 — which
-        // is what a naive encoder does — would lose precision.
+        // source digits, trailing zeros and all. Routing it through f64, which
+        // is what a naive encoder does, would lose precision.
         //
         // Anything a JSON parser would re-render differently is quoted instead,
         // so the exact digits always survive. That covers Postgres `numeric`
@@ -180,7 +180,7 @@ fn write_json(out: &mut String, v: &serde_json::Value, pretty: bool, depth: usiz
 /// Whether this decimal can be written as a bare JSON number and read back with
 /// byte-identical digits.
 ///
-/// Plain digits with at most one decimal point qualify — which is every value
+/// Plain digits with at most one decimal point qualify, which is every value
 /// Postgres `numeric` and MySQL `DECIMAL` actually produce. Exponent forms and
 /// `NaN` do not, and are quoted instead.
 fn is_lossless_json_number(s: &str) -> bool {
@@ -273,7 +273,7 @@ fn decode_value(col: &Column, v: &serde_json::Value) -> Result<Value> {
             let mut raw = String::new();
             match v {
                 // `json: string` mode wrote the payload as a JSON string, so a
-                // string here is that payload — unless it does not itself parse
+                // string here is that payload, unless it does not itself parse
                 // as JSON, in which case it really is a string document.
                 serde_json::Value::String(s) => {
                     match serde_json::from_str::<serde_json::Value>(s) {
@@ -316,7 +316,7 @@ fn kind_of(v: &serde_json::Value) -> &'static str {
 // Writers
 // ---------------------------------------------------------------------------
 
-/// One JSON object per line — the default format, and the one with the cleanest
+/// One JSON object per line, the default format, and the one with the cleanest
 /// git diffs, since a changed row is a changed line.
 pub struct JsonlWriter<'a> {
     path: String,

@@ -1,28 +1,12 @@
 //! Object storage buckets: export, load, and hashing.
 //!
-//! Buckets are the half of a Supabase project that a SQL dump cannot capture.
-//! The `storage.objects` table records metadata, but the bytes live in the
-//! storage service, so seedle talks to the Storage REST API — which also means
-//! the same code works against a local stack and a hosted project.
+//! Object bytes live in the storage service, not the database, so this talks to
+//! the Storage REST API. Per bucket, `manifest.jsonl` holds one line per object
+//! and `objects/<key>` holds the bytes. The lock records one hash over the
+//! manifest, so `seedle verify` re-checks every byte offline.
 //!
-//! What lands on disk, per bucket:
-//!
-//! ```text
-//! seed_data/buckets/<bucket>/
-//!   manifest.jsonl     one line per object, sorted by path
-//!   objects/<key>      the bytes, mirroring the object key
-//! ```
-//!
-//! The manifest carries a sha256 per object, and the lock records a single hash
-//! over the manifest — so one value in `seedle.lock` covers every byte in the
-//! bucket, and `seedle verify` can re-check it all without a network call.
-//!
-//! A bucket's *settings* — public, size limit, allowed mime types — are schema,
-//! created and changed by migrations. They are recorded in `seedle.lock` as a
-//! contract to check against, never written as an editable file and never
-//! applied: seedle moves data, it does not touch schema. A bucket that does not
-//! exist in the target is an error telling you to run your migrations, not an
-//! invitation to create it.
+//! Bucket settings are schema, created by migrations. They are recorded in the
+//! lock to check against, never written and never applied.
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -86,7 +70,7 @@ impl BucketExport {
         let mut buf = crate::io::LineBuffer::new();
         for o in &self.objects {
             // serde_json with a struct emits fields in declaration order, which
-            // is fixed at compile time — so this is stable by construction.
+            // is fixed at compile time, so this is stable by construction.
             buf.push_line(&serde_json::to_string(o).context("serializing a manifest entry")?);
         }
         Ok(buf.finish())
@@ -95,7 +79,7 @@ impl BucketExport {
     /// One hash covering the bucket's contents.
     ///
     /// Taken over the manifest rather than the file bytes, because the manifest
-    /// already contains every object's own sha256 plus its path and size — so a
+    /// already contains every object's own sha256 plus its path and size, so a
     /// change to any byte, name, or ordering changes this value, and computing
     /// it needs no second pass over the data.
     pub fn hash(&self) -> Result<String> {
@@ -522,7 +506,7 @@ fn truncate(s: &str) -> String {
     if s.chars().count() <= 300 {
         return s.to_string();
     }
-    format!("{}…", s.chars().take(300).collect::<String>())
+    format!("{}...", s.chars().take(300).collect::<String>())
 }
 
 #[cfg(test)]

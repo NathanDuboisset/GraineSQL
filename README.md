@@ -1,6 +1,6 @@
 # seedle
 
-Export selected rows — and storage buckets — from a database into deterministic,
+Export selected rows and storage buckets from a database into deterministic,
 diffable seed files. Load them back into another database in foreign-key order.
 
 ```
@@ -15,14 +15,12 @@ than a half-applied load.
 
 ## Why not `pg_dump`
 
-`pg_dump --data-only` is whole-database, has no per-table row filtering, and its
-output ordering is whatever the storage engine felt like — so committing it
-produces diff noise on every run. Hand-written seed SQL solves the diff problem
-and creates a worse one: it rots silently when the schema moves under it.
+`pg_dump --data-only` is whole-database, has no per-table filtering, and its row
+order is unspecified, so committing it produces diff noise on every run.
+Hand-written seed SQL diffs cleanly but rots silently when the schema moves.
 
-seedle exports the tables you name, filtered how you say, in a form that is
-byte-identical run to run, and refuses to run at all when the schema no longer
-matches what the files were written against.
+seedle exports the tables you name, filtered how you say, byte-identically run
+to run, and refuses to run when the schema no longer matches the files.
 
 ## Install
 
@@ -33,10 +31,9 @@ cargo install seedle                         # from source
 ```
 
 Or download a binary from [Releases](https://github.com/NathanDuboisset/seedle/releases);
-each archive ships a `.sha256` beside it.
+each archive ships a `.sha256`.
 
-Building from source needs Rust 1.85+ (2024 edition). Runtime: Postgres 12+ or
-MySQL 8+.
+Needs Rust 1.85+ to build. Postgres 12+, Supabase, or MySQL 8+ at runtime.
 
 ## Getting started
 
@@ -67,8 +64,11 @@ sources:
     read_only: true              # refuse `load` against this source
   dev:
     engine: postgres
-    env_file: .env
+    process_env: true            # read credentials from the environment
     default: true                # used when --source is omitted
+  local:
+    engine: supabase             # postgres plus storage, no extra config
+    env_file: .env
 
 export:
   out: seed                      # holds seedle.lock and the data files
@@ -107,13 +107,30 @@ Per-table keys: `where`, `order_by`, `limit`, `columns`, `exclude_columns`,
 
 ### Sources
 
-Credentials are read from the `.env` file a source names, not from
-`seedle.yaml`, and not through the process environment — so two sources can use
-the same variable name without colliding. Exactly one source may be
-`default: true`.
+Credentials never live in `seedle.yaml`. A source reads them from either an
+`env_file` it names or, with `process_env: true`, the process environment. An
+`env_file` still falls back to the environment for a variable it does not
+contain, which is how CI usually supplies them.
 
-`read_only: true` makes `load` refuse the source outright. Use it on anything
-you export from.
+`url_var` names the variable holding the connection URL; it defaults to
+`DATABASE_URL`, or to `SUPABASE_DB_URL` then `DATABASE_URL` for
+`engine: supabase`.
+
+Exactly one source may be `default: true`. `read_only: true` makes `load` refuse
+the source outright; use it on anything you export from.
+
+### Engines
+
+| `engine:` | Notes |
+|---|---|
+| `postgres` | Verified end to end |
+| `supabase` | Postgres, plus storage discovery so buckets need no config |
+| `mysql` | Implemented and unit-tested, not yet run against a live server |
+
+`engine: supabase` looks for the storage URL in `SUPABASE_URL`,
+`NEXT_PUBLIC_SUPABASE_URL`, `VITE_SUPABASE_URL` or `PUBLIC_SUPABASE_URL`, and
+the key in `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_SECRET_KEY` or
+`SERVICE_ROLE_KEY`. A `storage:` block overrides either.
 
 ## Commands
 
@@ -129,9 +146,26 @@ you export from.
 | `seedle load` | Push seed files into a database |
 | `seedle verify` | Re-hash the seed files and bucket objects against the lock. Needs no network |
 
-Global flags: `--config`, `--source`, `--json`, `-v`, `-q`.
-`--tables a,b` narrows `export`, `plan`, and `load`; `--buckets a,b` and
+Global flags: `--config`, `--source`, `--json`, `-v`, `-q`, `-y`.
+`--tables a,b` narrows `export`, `plan` and `load`; `--buckets a,b` and
 `--no-buckets` do the same for storage.
+
+### Referential completeness
+
+A per-table `where` can orphan rows in another table, and the failure would
+otherwise surface as a foreign-key violation partway through a load. `export`
+checks every foreign key in the export against the export and aborts if any
+value has no matching parent row:
+
+```
+$ seedle export
+error: the export is not referentially complete:
+  public.orders(user_id) -> public.users(id): 12 values with no matching row
+    e.g. 9f2c4b1e-...; 0d1e2f3a-...
+    widen the filter on public.users, or narrow the one on public.orders
+```
+
+`--no-fk-check` skips it.
 
 ## Storage buckets
 
@@ -159,50 +193,56 @@ Each bucket lands as:
 
 ```
 seed/buckets/project_files/
-  bucket.json        settings: public, size limit, allowed mime types
   manifest.jsonl     one line per object: path, size, sha256, content type
   objects/<key>      the bytes, mirroring the object key
 ```
 
-The manifest carries a **sha256 per object**, and `seedle.lock` records one hash
-over the manifest and settings — so a single value covers every byte in the
-bucket, and a change to any file, name, or setting moves it. `seedle verify`
-re-hashes every object from disk and needs no network.
+The manifest carries a sha256 per object, and `seedle.lock` records one hash
+over the manifest, so a single value covers every byte in the bucket.
+`seedle verify` re-hashes every object from disk with no network access.
 
-Loading uploads with upsert, creating the bucket if it is missing, and runs
-**after** the database transaction commits — object storage has no transaction to
-join, so uploading earlier could leave files behind for rows that were then
-rolled back. A local file whose hash no longer matches the manifest is refused
-rather than pushed.
+Bucket *settings* (public, size limit, allowed mime types) are schema, created by
+migrations. seedle records them in `seedle.lock` to check against and never
+writes them: **a bucket that does not exist in the target is an error, not
+something seedle creates.**
 
-Object keys are validated before any bytes move: a key containing `..`, a leading
-`/`, or a backslash is refused rather than silently rewritten, so a hostile key
-cannot write outside the seed directory.
+Loading uploads with upsert, after the database transaction commits. Object
+storage has no transaction to join, so uploading earlier could leave files behind
+for rows that were then rolled back. A local file whose hash no longer matches
+the manifest is refused rather than pushed.
+
+Object keys containing `..`, a leading `/`, or a backslash are refused rather
+than rewritten, so a key cannot write outside the seed directory.
 
 ## Schema drift
 
-The distinction that matters: *breaking* drift would reject or corrupt data, so
-it aborts before anything is touched; *benign* drift cannot, so it warns and
-proceeds.
+Three severities, by what the change would do to a load.
 
-**Breaking — aborts:**
+**breaking** aborts. The load would be rejected or would corrupt data.
 
-- a table or a locked column dropped
-- a type narrowed (`text` → `varchar(20)`, `int8` → `int4`, `timestamptz` → `date`)
+- a type narrowed (`text` to `varchar(20)`, `int8` to `int4`)
 - nullability tightened to `NOT NULL` with no default
 - a new `NOT NULL` column with no default
 - the primary key changed, or a unique constraint dropped
 - a foreign key added, dropped, or retargeted
 - an enum label removed
 - a column became generated
+- a bucket missing, or its size limit below the largest exported object
 
-**Benign — warns and continues:**
+**needs confirmation** prompts y/N, or accepts `--yes`. The load succeeds but
+silently stops carrying data.
+
+- a table dropped
+- a column dropped that the seed files hold data for
+
+**benign** proceeds.
 
 - a new nullable column, or `NOT NULL` with a default
-- a type widened (`varchar(50)` → `varchar(200)` → `text`, `int4` → `int8`)
+- a type widened (`varchar(50)` to `varchar(200)` to `text`, `int4` to `int8`)
 - nullability relaxed
 - a new enum label, a new unique constraint, an unlisted new table
-- columns physically reordered, or a constraint renamed
+- columns reordered, or a constraint renamed
+- a bucket's visibility or mime allowlist changed
 
 ```
 $ seedle diff
@@ -210,18 +250,20 @@ $ seedle diff
 breaking:
   public.countries.region  column added (text, NOT NULL with no default)
                              every insert from the seed files would omit it and be rejected
-  public.employees.name    column dropped (was text)
-                             the seed files carry a value for it
   public.torture.t_i64     int64 -> int32
                              existing seed values may not fit or may fail to parse
 
-3 breaking, 0 benign. Review, then re-run `seedle lock` to accept.
+needs confirmation:
+  public.employees.name    column dropped (was text)
+                             the seed files carry data for it, which will be discarded
+
+2 breaking, 1 needing confirmation, 0 benign. Review, then re-run `seedle lock` to accept.
 ```
 
-Review, then `seedle lock` to accept the change, or `--force` to proceed anyway.
+`seedle lock` accepts the change; `--force` proceeds without it.
 
-Note that `export` judges the **source** against the lock while `load` judges the
-**target** — each checks the database it is about to act on.
+`export` judges the source against the lock, `load` judges the target: each
+checks the database it is about to act on.
 
 ## Determinism
 
@@ -233,7 +275,7 @@ These are enforced by the test suite, not just intended:
    run.
 2. **Pinned collation.** Text ordering uses an explicit binary collation, because
    the default collation is a per-database property.
-3. **The lock decides column order,** not the live database — so two databases
+3. **The lock decides column order,** not the live database, so two databases
    holding the same columns in different physical order still export identically.
 4. **Canonical values.** Shortest round-trip floats; decimals kept as exact digit
    strings, never through `f64`; timestamps normalised to UTC with fixed
@@ -248,26 +290,24 @@ These are enforced by the test suite, not just intended:
 
 ## Formats
 
-**jsonl** (default) — one object per row. Best fidelity and the cleanest diffs,
-since a changed row is a changed line. `json: unroll` nests json/jsonb columns
-instead of escaping them.
+**jsonl** (default), one object per row. Best fidelity, cleanest diffs, since a
+changed row is a changed line. `json: unroll` nests json columns instead of
+escaping them.
 
-**csv** — for interop. CSV cannot natively distinguish `NULL` from the empty
+**csv**: for interop. CSV cannot natively distinguish `NULL` from the empty
 string, so seedle uses the Postgres `COPY ... CSV` convention, which round-trips:
 
 > an **unquoted** empty field is `NULL`; a **quoted** empty field (`""`) is the
 > empty string.
 
-**sql** — batched `INSERT` statements with the right dialect quoting and conflict
-clause, runnable straight through `psql` or `mysql`. Write-only: seedle does not
-read `.sql` back, because that would need a full dialect parser. `load` says so
-explicitly rather than failing obscurely.
+**sql**: batched `INSERT` statements with dialect-correct quoting and conflict
+clauses, runnable through `psql` or `mysql`. `load` reads them back, accepting
+the shape seedle writes and rejecting anything else rather than guessing.
 
-**`layout: per_row`** — one `.json` file per row, in a directory named after the
-table, named from the primary key. For small human-edited tables (templates,
-config rows) where a one-line-per-row diff is unreadable. This is where
-`pretty: true` applies; pretty-printing is meaningless in jsonl, which is one
-line per row by definition.
+**`layout: per_row`**: one `.json` file per row, named from the primary key, in
+a directory named after the table. For small hand-edited tables where a
+one-line-per-row diff is unreadable. `pretty: true` applies here only; jsonl is
+one line per row by definition.
 
 ## Loading
 
@@ -276,30 +316,26 @@ through leaves the database exactly as it was.
 
 Per-table modes:
 
-- `upsert` (default) — insert, updating non-key columns on conflict. Re-running
+- `upsert` (default), insert, updating non-key columns on conflict. Re-running
   converges on the file contents.
-- `insert` — plain insert; a conflict aborts.
-- `skip_existing` — ignore rows that already exist.
-- `truncate_first` — empty the table first. Emptying happens as one pass in
+- `insert`, plain insert; a conflict aborts.
+- `skip_existing`, ignore rows that already exist.
+- `truncate_first`, empty the table first. Emptying happens as one pass in
   reverse foreign-key order, children before parents.
 
-`TRUNCATE` is deliberately not used: Postgres refuses to truncate a table any
-foreign key references, even when the referencing table is empty, and MySQL's
-`TRUNCATE` performs an implicit commit that would break the load's atomicity.
-`DELETE FROM` has neither problem.
+`DELETE FROM` rather than `TRUNCATE`: Postgres refuses to truncate a table any
+foreign key references even when the referencing table is empty, and MySQL's
+`TRUNCATE` commits implicitly, which would break atomicity.
 
-After loading a table with a serial/identity key, the sequence is advanced past
-the loaded rows — without this the application's next insert collides with a seed
-row.
+After loading a serial/identity key, the sequence is advanced past the loaded
+rows, so the application's next insert does not collide.
 
-**Confirmation** is required when the target is not local or when the plan
-destroys rows. `--yes` skips it; `--dry-run` does everything except commit.
+Confirmation is required when the target is not local or the plan destroys rows.
+`--yes` skips it, `--dry-run` does everything except commit.
 
-**Foreign-key cycles** are detected and named. Postgres can only load a cycle
-when every constraint in it is `DEFERRABLE`; if so, seedle defers them for the
-transaction, and if not it says exactly that rather than failing obscurely.
-A self-reference (`manager_id` pointing at the same table) is not a cycle and is
-resolved within the table's own batch.
+Foreign-key cycles are detected and named. Postgres can load one only when every
+constraint in it is `DEFERRABLE`, in which case seedle defers them for the
+transaction; otherwise it says so. A self-reference is not a cycle.
 
 ## CI
 
@@ -327,25 +363,6 @@ rather than fail when those variables are unset. The most valuable one is
 `export_then_load_then_export_is_byte_identical`: it exercises every encoder and
 decoder at once and fails on any asymmetry between them.
 
-## Engine support
-
-**Postgres** is verified end-to-end against a live server: introspection, all
-four formats, every load mode, drift classification, cycles, and the full
-export → load → re-export round trip.
-
-**MySQL** has the dialect layer (quoting, literals, `ON DUPLICATE KEY UPDATE`,
-`INSERT IGNORE`, `UNHEX`, `FOREIGN_KEY_CHECKS`) and `information_schema`
-introspection implemented and unit-tested, but it has **not been exercised
-against a live MySQL server** — no server was available in the environment where
-it was written. Treat it as untested: the type-mapping decisions it makes are
-documented in `src/db/mysql.rs`, and the ones worth checking first are
-
-- `TINYINT(1)` read as boolean (a convention, not a guarantee),
-- `BIGINT UNSIGNED` carried as an exact decimal, since it overruns `i64`,
-- `TIMESTAMP` treated as zone-aware and `DATETIME` as not — which is correct but
-  the opposite of what the names suggest,
-- enums keyed by their inline declaration, there being no named type.
-
 ## Limitations
 
 - A table's rows are read as a stream but each seed file is built in memory. Seed
@@ -358,14 +375,19 @@ documented in `src/db/mysql.rs`, and the ones worth checking first are
 - In `json: unroll` mode, a json column whose value is a bare scalar (`null`,
   a number, a string) is written quoted rather than nested. Unrolling those would
   make a JSON `null` indistinguishable from SQL `NULL`, which would silently
-  rewrite the row on reload. Objects and arrays — the cases that benefit — nest
+  rewrite the row on reload. Objects and arrays, the cases that benefit, nest
   normally.
 - Postgres `numeric` NaN and exponent-form decimals are written as quoted strings
   in JSON, since neither survives a JSON number token unchanged.
 
+## Roadmap
+
+See [TODO.md](TODO.md). Nearest items: SQLite, anonymisation, and walking
+foreign keys to pull in missing parents rather than only reporting them.
+
 ## Licence
 
-[PolyForm Noncommercial 1.0.0](LICENSE) — **source-available, not open source**.
+[PolyForm Noncommercial 1.0.0](LICENSE), **source-available, not open source**.
 
 Use it freely for anything that is not for commercial advantage or monetary
 compensation: personal projects, research, education, evaluation. Using it in or

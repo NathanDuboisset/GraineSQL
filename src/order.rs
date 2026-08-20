@@ -25,7 +25,7 @@ pub struct Order {
 }
 
 impl Order {
-    /// Delete/truncate order — the exact reverse of the insert order.
+    /// Delete/truncate order, the exact reverse of the insert order.
     pub fn reversed(&self) -> Vec<TableId> {
         self.tables.iter().rev().cloned().collect()
     }
@@ -37,7 +37,7 @@ impl Order {
 /// pointing at an unselected table is ignored, since we are not loading it.
 ///
 /// Ties are broken by table id, so the output depends only on the schema and the
-/// selection — never on hash iteration order or on the order tables were listed.
+/// selection, never on hash iteration order or on the order tables were listed.
 pub fn topological(schema: &Schema, selected: &[TableId]) -> Order {
     // Canonicalise and dedupe up front so an unqualified id in the config lines
     // up with the qualified id introspection produced.
@@ -63,7 +63,7 @@ pub fn topological(schema: &Schema, selected: &[TableId]) -> Order {
                 continue;
             };
             if !nodes.contains(&parent) || parent == *node {
-                // Unselected parent, or a self-reference — a self-reference is
+                // Unselected parent, or a self-reference, a self-reference is
                 // satisfied within a single table's insert batch, so it never
                 // constrains table ordering.
                 continue;
@@ -145,7 +145,7 @@ fn find_cycles(
             continue;
         }
         // Walk parent edges from `start`, staying inside `stuck`, until we
-        // revisit a node on the current path — that closes a cycle.
+        // revisit a node on the current path, that closes a cycle.
         let mut path: Vec<TableId> = Vec::new();
         let mut on_path: BTreeSet<TableId> = BTreeSet::new();
         let mut cursor = start.clone();

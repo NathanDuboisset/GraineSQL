@@ -1,15 +1,9 @@
 //! CSV with the Postgres `COPY ... CSV` NULL convention.
 //!
-//! CSV cannot natively distinguish SQL `NULL` from the empty string, which makes
-//! every naive CSV exporter lossy. We adopt the one convention that round-trips
-//! and that an existing tool already implements:
-//!
-//! - an **unquoted empty field** is `NULL`
-//! - a **quoted empty field** (`""`) is the empty string
-//!
-//! That distinction is invisible to a parser that hands back only the decoded
-//! text, which is why both the writer and the reader here are hand-rolled rather
-//! than delegated to the `csv` crate.
+//! CSV cannot natively distinguish `NULL` from the empty string, so an unquoted
+//! empty field is `NULL` and a quoted one (`""`) is the empty string. That
+//! distinction is invisible to a parser returning only decoded text, which is
+//! why the writer and reader here are hand-rolled.
 
 use std::path::Path;
 

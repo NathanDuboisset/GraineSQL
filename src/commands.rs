@@ -1,4 +1,4 @@
-//! Command implementations — the layer that wires config, database, lock, and
+//! Command implementations, the layer that wires config, database, lock, and
 //! formats together.
 
 use std::io::Write as _;
@@ -26,6 +26,8 @@ pub struct Ctx {
     pub json: bool,
     pub verbose: bool,
     pub quiet: bool,
+    /// Skip every confirmation prompt.
+    pub assume_yes: bool,
 }
 
 impl Ctx {
@@ -38,6 +40,7 @@ impl Ctx {
             json: cli.json,
             verbose: cli.verbose,
             quiet: cli.quiet,
+            assume_yes: cli.yes,
         })
     }
 
@@ -83,9 +86,9 @@ impl Ctx {
 /// Introspect the live schema, pruned to the configured tables and their
 /// foreign-key closure.
 pub async fn introspect(db: &Db, cfg: &Config) -> Result<Schema> {
-    let full = match db.engine() {
-        Engine::Postgres => db::postgres::introspect(db).await?,
+    let full = match db.engine().dialect() {
         Engine::Mysql => db::mysql::introspect(db).await?,
+        _ => db::postgres::introspect(db).await?,
     };
     let wanted: Vec<TableId> = cfg.resolved_tables()?.into_iter().map(|t| t.id).collect();
     let (mut live, missing) = db::prune(&full, &wanted)?;
@@ -188,20 +191,23 @@ pub fn gate_on_drift_with_buckets(
         return Ok(report);
     }
 
-    if report.has_breaking() {
-        if !force {
-            bail!(
-                "schema drift vs seedle.lock\n{}\nNothing was changed. Review the differences, \
-                 then run `seedle lock` to accept them, or `--force` to proceed anyway.",
-                report.render()
-            );
-        }
-        ctx.warn(format!(
-            "warning: proceeding past breaking schema drift because --force was given\n{}",
+    if report.has_breaking() && !force {
+        bail!(
+            "schema drift vs seedle.lock\n{}\nNothing was changed. Review, then run \
+             `seedle lock` to accept, or --force to proceed anyway.",
             report.render()
-        ));
-    } else {
-        ctx.warn(format!("note: benign schema drift\n{}", report.render()));
+        );
+    }
+
+    ctx.warn(format!("schema drift vs seedle.lock\n{}", report.render()));
+
+    if report.has_breaking() {
+        ctx.warn("proceeding past breaking drift because --force was given");
+    } else if report.needs_confirmation() && !force && !ctx.assume_yes {
+        // Data loss, not a failed load: the user decides.
+        if !confirm("Discard that data and continue?")? {
+            bail!("aborted; nothing was changed");
+        }
     }
     Ok(report)
 }
@@ -433,9 +439,10 @@ fn drift_json(report: &drift::Report) -> String {
             })
         })
         .collect();
-    let (breaking, benign) = report.counts();
+    let (breaking, confirm, benign) = report.counts();
     serde_json::to_string_pretty(&serde_json::json!({
         "breaking": breaking,
+        "needs_confirmation": confirm,
         "benign": benign,
         "drifts": items,
     }))
@@ -455,6 +462,7 @@ pub async fn cmd_export(
     format_override: Option<crate::config::Format>,
     out_override: Option<PathBuf>,
     force: bool,
+    no_fk_check: bool,
 ) -> Result<()> {
     let selected = ctx.cfg.select_tables(tables.as_deref())?;
     let buckets = if no_buckets {
@@ -497,6 +505,19 @@ pub async fn cmd_export(
         ));
     }
 
+    // A configured table the database no longer has was reported as drift and
+    // accepted above; skip it rather than failing on it here.
+    let order: Vec<TableId> = order
+        .into_iter()
+        .filter(|id| {
+            if live.get(id).is_some() {
+                return true;
+            }
+            ctx.warn(format!("skipping {id}: it no longer exists"));
+            false
+        })
+        .collect();
+
     // Export in load order, so progress output reads the way the data depends.
     let mut ordered: Vec<ResolvedTable> = Vec::new();
     for id in &order {
@@ -519,8 +540,20 @@ pub async fn cmd_export(
     let mut summary = Vec::new();
     let mut total_rows = 0u64;
 
+    // Which key values to capture, so the referential check can run afterwards.
+    let exported_ids: Vec<TableId> = ordered
+        .iter()
+        .map(|t| live.resolve(&t.id).unwrap_or_else(|| t.id.clone()))
+        .collect();
+    let to_index = export::columns_to_index(&live, &exported_ids);
+    let mut exports: std::collections::BTreeMap<TableId, export::TableExport> =
+        std::collections::BTreeMap::new();
+
     for cfg in &ordered {
-        let exported = export::export_table(&db, &live, cfg, ctx.cfg.export.sql_batch).await?;
+        let id = live.resolve(&cfg.id).unwrap_or_else(|| cfg.id.clone());
+        let index = to_index.get(&id).cloned().unwrap_or_default();
+        let exported =
+            export::export_table(&db, &live, cfg, ctx.cfg.export.sql_batch, &index).await?;
         ctx.detail(format!(
             "  {} -> {}",
             cfg.id,
@@ -547,6 +580,16 @@ pub async fn cmd_export(
             "rows": exported.rows,
             "files": exported.files.iter().map(|f| f.path.clone()).collect::<Vec<_>>(),
         }));
+        exports.insert(exported.table.clone(), exported);
+    }
+
+    // A set of per-table filters can easily orphan rows. Loading that into an
+    // empty database fails partway through, so say so now instead.
+    if !no_fk_check {
+        let dangling = export::check_referential_closure(&live, &exports);
+        if !dangling.is_empty() {
+            bail!("{}", export::render_dangling(&dangling));
+        }
     }
 
     // Buckets: the half of a project a SQL dump cannot capture.
@@ -779,7 +822,7 @@ async fn load_buckets(
         // to silently create with settings it guessed from a seed file.
         client.bucket(name).await.with_context(|| {
             format!(
-                "bucket {name:?} must exist before its objects can be loaded — buckets are \
+                "bucket {name:?} must exist before its objects can be loaded, buckets are \
                  created by migrations, so run them against this project first"
             )
         })?;
@@ -852,18 +895,11 @@ async fn build_plans(
         else {
             continue;
         };
-        if !format::is_loadable(cfg) {
-            bail!(
-                "{}",
-                format::read(&out_dir, &[], cfg, &live.default_schema).unwrap_err()
-            );
-        }
-
         let table = live
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("table {id} is not in the live schema"))?;
         let columns = export::selected_columns(table, cfg)?;
-        let rows = format::read(&out_dir, &columns, cfg, &live.default_schema)?;
+        let rows = format::read(&out_dir, &columns, cfg, &live.default_schema, lock.engine)?;
         load::validate_rows(table, &columns, &rows, cfg)?;
 
         plans.push(load::TablePlan {
@@ -913,9 +949,9 @@ pub async fn cmd_load(
     no_buckets: bool,
     dry_run: bool,
     no_transaction: bool,
-    yes: bool,
     force: bool,
 ) -> Result<()> {
+    let yes = ctx.assume_yes;
     let src = ctx.resolve_source()?;
     load::check_writable(&src)?;
 
@@ -1149,7 +1185,7 @@ pub async fn cmd_load(
     }
 
     // MySQL's AUTO_INCREMENT reset needs a read followed by an ALTER TABLE,
-    // which implicitly commits — so it can only run once the load itself has
+    // which implicitly commits, so it can only run once the load itself has
     // committed, and is skipped entirely for a dry run.
     if deferred_fixups && ctx.cfg.load.fix_sequences && !dry_run {
         drop(conn);
@@ -1214,17 +1250,7 @@ pub fn cmd_verify(ctx: &Ctx) -> Result<()> {
             }
         };
 
-        if !format::is_loadable(cfg) {
-            // A .sql file cannot be re-read, so only its bytes can be checked.
-            match hash_recorded_path(&out_dir, &entry.path) {
-                Ok(hash) if hash == entry.sha256 => checked += 1,
-                Ok(_) => problems.push(format!("{id}: {} has changed since export", entry.path)),
-                Err(e) => problems.push(format!("{id}: {e}")),
-            }
-            continue;
-        }
-
-        match format::read(&out_dir, &columns, cfg, &schema.default_schema) {
+        match format::read(&out_dir, &columns, cfg, &schema.default_schema, lock.engine) {
             Err(e) => problems.push(format!("{id}: {e:#}")),
             Ok(rows) => {
                 if rows.len() as u64 != entry.rows {
@@ -1325,12 +1351,6 @@ pub fn cmd_verify(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
-fn hash_recorded_path(out_dir: &Path, rel: &str) -> Result<String> {
-    let path = out_dir.join(rel);
-    let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-    Ok(crate::lock::file_hash(&bytes))
-}
-
 // ---------------------------------------------------------------------------
 // init
 // ---------------------------------------------------------------------------
@@ -1366,14 +1386,14 @@ pub async fn cmd_init(cli: &Cli, url: Option<String>, force: bool) -> Result<()>
             storage: None,
         };
         let db = Db::connect(&src).await?;
-        tables = match engine {
-            Engine::Postgres => db::postgres::list_tables(&db).await?,
+        tables = match engine.dialect() {
             Engine::Mysql => db::mysql::list_tables(&db).await?,
+            _ => db::postgres::list_tables(&db).await?,
         };
         default_schema = db
-            .query_text(match engine {
-                Engine::Postgres => "SELECT current_schema()",
+            .query_text(match engine.dialect() {
                 Engine::Mysql => "SELECT DATABASE()",
+                _ => "SELECT current_schema()",
             })
             .await
             .unwrap_or_default()
@@ -1448,7 +1468,20 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             format,
             out,
             force,
-        } => cmd_export(&ctx, tables, buckets, no_buckets, format, out, force).await,
+            no_fk_check,
+        } => {
+            cmd_export(
+                &ctx,
+                tables,
+                buckets,
+                no_buckets,
+                format,
+                out,
+                force,
+                no_fk_check,
+            )
+            .await
+        }
         Command::Plan { tables } => cmd_plan(&ctx, tables).await,
         Command::Load {
             tables,
@@ -1456,7 +1489,6 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             no_buckets,
             dry_run,
             no_transaction,
-            yes,
             force,
         } => {
             cmd_load(
@@ -1466,7 +1498,6 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
                 no_buckets,
                 dry_run,
                 no_transaction,
-                yes,
                 force,
             )
             .await

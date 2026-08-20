@@ -73,6 +73,7 @@ pub fn read(
     columns: &[&Column],
     cfg: &ResolvedTable,
     default_schema: &str,
+    engine: crate::config::Engine,
 ) -> Result<Vec<Vec<Value>>> {
     let stem = cfg.id.file_stem(default_schema);
     match (cfg.layout, cfg.format) {
@@ -81,22 +82,13 @@ pub fn read(
         }
         (Layout::Single, Format::Csv) => csv::read_csv(&dir.join(format!("{stem}.csv")), columns),
         (Layout::PerRow, Format::Json) => json::read_per_row(&dir.join(&stem), columns),
-        (_, Format::Sql) => bail!(
-            "table {} is exported as SQL, which seedle cannot read back — that would need a \
-             full dialect parser.\n\
-             Run {stem}.sql through your database client directly, or switch the table to \
-             `format: jsonl` so `seedle load` can handle it.",
-            cfg.id
-        ),
+        (Layout::Single, Format::Sql) => {
+            sql::read_sql(&dir.join(format!("{stem}.sql")), columns, engine)
+        }
         (layout, format) => bail!(
             "table {}: {layout:?} layout with format {} is not a valid combination",
             cfg.id,
             format.extension()
         ),
     }
-}
-
-/// Whether `seedle load` can read this table's files back.
-pub fn is_loadable(cfg: &ResolvedTable) -> bool {
-    !matches!(cfg.format, Format::Sql)
 }

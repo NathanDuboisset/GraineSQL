@@ -101,13 +101,9 @@ impl<'de> Deserialize<'de> for TableId {
 
 /// Coarse classification of a column type.
 ///
-/// Introspection maps every engine-specific type name onto one of these. The
-/// class drives three things: how a value is decoded and encoded, whether a type
-/// change counts as widening (benign) or narrowing (breaking), and whether the
-/// generated `SELECT` needs an explicit `::text` cast.
-///
-/// Serialized flattened into [`Column`], so the variant field names must not
-/// collide with `Column`'s own — hence `type_name` rather than `name`.
+/// Drives value encoding, widening rules, and whether the generated `SELECT`
+/// needs a `::text` cast. Serialized flattened into [`Column`], so variant
+/// fields must not collide with `Column`'s own: hence `type_name`, not `name`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TypeClass {
@@ -262,14 +258,14 @@ pub struct Column {
     #[serde(flatten)]
     pub class: TypeClass,
     pub nullable: bool,
-    /// Whether the column has a DEFAULT, an identity, or is generated — i.e.
+    /// Whether the column has a DEFAULT, an identity, or is generated, i.e.
     /// whether the DB can fill it in when the seed files omit it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub has_default: bool,
     /// Generated/computed columns cannot be written to at all.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub generated: bool,
-    /// Serial / identity / AUTO_INCREMENT — needs sequence fixup after a load.
+    /// Serial / identity / AUTO_INCREMENT, needs sequence fixup after a load.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub identity: bool,
 }
@@ -332,7 +328,7 @@ impl Table {
 /// therefore reproducible; introspection inserts in sorted order.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Schema {
-    /// The connection's default schema — `public` on Postgres, the database name
+    /// The connection's default schema, `public` on Postgres, the database name
     /// on MySQL. Needed to decide when a table id must be qualified.
     pub default_schema: String,
     pub tables: IndexMap<TableId, Table>,

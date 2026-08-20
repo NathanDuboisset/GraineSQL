@@ -36,6 +36,10 @@ pub struct Cli {
     #[arg(long, short = 'q', global = true, conflicts_with = "verbose")]
     pub quiet: bool,
 
+    /// Answer yes to every confirmation prompt.
+    #[arg(long, short = 'y', global = true)]
+    pub yes: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -96,6 +100,11 @@ pub enum Command {
         /// Export even if the lock is missing or the schema has drifted.
         #[arg(long)]
         force: bool,
+
+        /// Skip the check that every exported foreign key resolves inside the
+        /// export. The files may then fail to load into an empty database.
+        #[arg(long)]
+        no_fk_check: bool,
     },
 
     /// Show the load order, row counts, and per-table action. Writes nothing.
@@ -126,10 +135,6 @@ pub enum Command {
         /// failure leaves the database partly written.
         #[arg(long)]
         no_transaction: bool,
-
-        /// Skip the confirmation prompt for a remote or destructive load.
-        #[arg(long, short = 'y')]
-        yes: bool,
 
         /// Load even if the schema has drifted. Dangerous.
         #[arg(long)]
@@ -206,7 +211,6 @@ mod tests {
         let Command::Load {
             dry_run,
             no_transaction,
-            yes,
             force,
             ..
         } = cli.command
@@ -214,7 +218,7 @@ mod tests {
             panic!("expected load")
         };
         assert!(!dry_run);
-        assert!(!yes, "confirmation must be required unless asked for");
+        assert!(!cli.yes, "confirmation must be required unless asked for");
         assert!(!force, "drift must block unless overridden");
         assert!(
             !no_transaction,

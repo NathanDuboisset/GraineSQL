@@ -6,7 +6,7 @@
 //! without stepping on each other.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
@@ -56,9 +56,11 @@ pub fn resolve(cfg: &Config, name: &str) -> Result<ResolvedSource> {
     let src = cfg.source(name)?;
     let (url, origin) = resolve_url(cfg, name, src)?;
     check_scheme(name, src.engine, &url)?;
-    let storage = match &src.storage {
-        None => None,
-        Some(sc) => Some(resolve_storage(cfg, name, src, sc)?),
+    // A Supabase source gets storage without declaring it.
+    let storage = if src.storage.is_some() || src.engine.has_storage() {
+        Some(resolve_storage(cfg, name, src, src.storage.as_ref())?)
+    } else {
+        None
     };
     Ok(ResolvedSource {
         name: name.to_string(),
@@ -72,42 +74,44 @@ pub fn resolve(cfg: &Config, name: &str) -> Result<ResolvedSource> {
 
 /// Resolve a source's storage URL and service key.
 ///
-/// The key is read the same way the database password is — from the source's
-/// `.env`, never from the config file — so a service-role key never lands in
+/// The key is read the same way the database password is, from the source's
+/// `.env`, never from the config file, so a service-role key never lands in
 /// version control.
 fn resolve_storage(
     cfg: &Config,
     name: &str,
     src: &SourceConfig,
-    sc: &crate::config::StorageConfig,
+    sc: Option<&crate::config::StorageConfig>,
 ) -> Result<crate::storage::StorageAccess> {
-    let vars = match &src.env_file {
-        Some(f) => read_env_file(&cfg.base_dir.join(f)).unwrap_or_default(),
-        None => BTreeMap::new(),
-    };
-    let lookup = |var: &str| -> Option<String> {
-        vars.get(var)
-            .cloned()
-            .or_else(|| std::env::var(var).ok())
-            .filter(|v| !v.trim().is_empty())
+    let vars = Vars::load(cfg, src)?;
+
+    let base_url = match sc.and_then(|s| s.url.clone()) {
+        Some(u) => u,
+        None => {
+            let named = sc.and_then(|s| s.url_var.clone());
+            let candidates: Vec<&str> = match &named {
+                Some(v) => vec![v.as_str()],
+                None => crate::config::supabase::URL_VARS.to_vec(),
+            };
+            vars.first(&candidates).map(|(v, _)| v).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "source {name:?}: no storage URL. Set one of {}, or `storage.url_var`.",
+                    candidates.join(", ")
+                )
+            })?
+        }
     };
 
-    let base_url = match (&sc.url, &sc.url_var) {
-        (Some(u), _) => u.clone(),
-        (None, Some(var)) => lookup(var).ok_or_else(|| {
-            anyhow::anyhow!("source {name:?}: storage url variable {var} is not set")
-        })?,
-        (None, None) => bail!(
-            "source {name:?}: `storage` needs either `url` or `url_var` (the project base \
-             URL, e.g. http://127.0.0.1:54321)"
-        ),
+    let named = sc.and_then(|s| s.key_var.clone());
+    let candidates: Vec<&str> = match &named {
+        Some(v) => vec![v.as_str()],
+        None => crate::config::supabase::KEY_VARS.to_vec(),
     };
-
-    let key_var = sc.key_var.as_deref().unwrap_or("SUPABASE_SERVICE_ROLE_KEY");
-    let key = lookup(key_var).ok_or_else(|| {
+    let key = vars.first(&candidates).map(|(v, _)| v).ok_or_else(|| {
         anyhow::anyhow!(
-            "source {name:?}: storage key variable {key_var} is not set.\n\
-             Storage listing and writing need the service-role key, not the anon key."
+            "source {name:?}: no storage key. Set one of {}, or `storage.key_var`. \
+             Listing and writing need the service-role key, not the anon key.",
+            candidates.join(", ")
         )
     })?;
 
@@ -117,49 +121,92 @@ fn resolve_storage(
     })
 }
 
+/// Credentials available to a source: its `.env` file if it has one, plus the
+/// process environment as a fallback.
+struct Vars {
+    file: BTreeMap<String, String>,
+    file_path: Option<PathBuf>,
+}
+
+impl Vars {
+    fn load(cfg: &Config, src: &SourceConfig) -> Result<Vars> {
+        match &src.env_file {
+            None => Ok(Vars {
+                file: BTreeMap::new(),
+                file_path: None,
+            }),
+            Some(f) => {
+                let path = cfg.base_dir.join(f);
+                Ok(Vars {
+                    file: read_env_file(&path)?,
+                    file_path: Some(path),
+                })
+            }
+        }
+    }
+
+    /// Look one variable up, file first, then the process environment.
+    fn get(&self, var: &str) -> Option<(String, String)> {
+        if let Some(v) = self.file.get(var).filter(|v| !v.trim().is_empty()) {
+            let origin = match &self.file_path {
+                Some(p) => format!("{} ({var})", p.display()),
+                None => format!("env file ({var})"),
+            };
+            return Some((v.clone(), origin));
+        }
+        std::env::var(var)
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .map(|v| (v, format!("process env ({var})")))
+    }
+
+    /// First of `candidates` that is set.
+    fn first(&self, candidates: &[&str]) -> Option<(String, String)> {
+        candidates.iter().find_map(|v| self.get(v))
+    }
+
+    fn names(&self) -> String {
+        if self.file.is_empty() {
+            "(none)".to_string()
+        } else {
+            self.file.keys().cloned().collect::<Vec<_>>().join(", ")
+        }
+    }
+}
+
 fn resolve_url(cfg: &Config, name: &str, src: &SourceConfig) -> Result<(String, String)> {
     if let Some(url) = &src.url {
         return Ok((url.clone(), "config `url`".to_string()));
     }
 
-    let var = src.url_var.as_deref().unwrap_or(DEFAULT_URL_VAR);
+    let vars = Vars::load(cfg, src)?;
 
-    if let Some(env_file) = &src.env_file {
-        let path = cfg.base_dir.join(env_file);
-        let vars = read_env_file(&path)?;
-        if let Some(url) = vars.get(var) {
-            if url.trim().is_empty() {
-                bail!(
-                    "source {name:?}: {var} is set but empty in {}",
-                    path.display()
-                );
-            }
-            return Ok((url.clone(), format!("{} ({var})", path.display())));
-        }
-        // The env file exists but lacks the variable — fall back to the process
-        // environment, which is how CI usually supplies it.
-        if let Ok(url) = std::env::var(var) {
-            return Ok((url, format!("process env ({var})")));
-        }
-        bail!(
-            "source {name:?}: {var} not found in {} nor in the environment.\n\
-             Variables present in that file: {}",
-            path.display(),
-            if vars.is_empty() {
-                "(none)".to_string()
-            } else {
-                vars.keys().cloned().collect::<Vec<_>>().join(", ")
-            }
-        );
+    // An explicit url_var must be found; otherwise try the engine's usual names.
+    if let Some(var) = &src.url_var {
+        return vars.get(var).ok_or_else(|| {
+            anyhow::anyhow!(
+                "source {name:?}: {var} is not set{}.\nVariables in that file: {}",
+                match &vars.file_path {
+                    Some(p) => format!(" in {} nor in the environment", p.display()),
+                    None => " in the environment".to_string(),
+                },
+                vars.names()
+            )
+        });
     }
 
-    match std::env::var(var) {
-        Ok(url) if !url.trim().is_empty() => Ok((url, format!("process env ({var})"))),
-        _ => bail!(
-            "source {name:?}: {var} is not set in the environment and the source \
-             defines no `env_file`"
-        ),
-    }
+    let candidates: Vec<&str> = if src.engine == crate::config::Engine::Supabase {
+        crate::config::supabase::DB_URL_VARS.to_vec()
+    } else {
+        vec![DEFAULT_URL_VAR]
+    };
+    vars.first(&candidates).ok_or_else(|| {
+        anyhow::anyhow!(
+            "source {name:?}: none of {} is set. Set one, or name a variable with \
+             `url_var`.",
+            candidates.join(", ")
+        )
+    })
 }
 
 /// Parse a `.env` file into a map, leaving the process environment untouched.
@@ -179,9 +226,10 @@ fn read_env_file(path: &Path) -> Result<BTreeMap<String, String>> {
 
 fn check_scheme(name: &str, engine: Engine, url: &str) -> Result<()> {
     let scheme = url.split_once("://").map(|(s, _)| s).unwrap_or("");
-    let ok = match engine {
+    let ok = match engine.dialect() {
         Engine::Postgres => matches!(scheme, "postgres" | "postgresql"),
         Engine::Mysql => matches!(scheme, "mysql" | "mariadb"),
+        Engine::Supabase => unreachable!("dialect() never returns Supabase"),
     };
     if !ok {
         bail!(

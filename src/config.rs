@@ -17,6 +17,9 @@ pub const LOCK_FILENAME: &str = "seedle.lock";
 pub enum Engine {
     Postgres,
     Mysql,
+    /// Postgres, plus storage defaults so a Supabase project needs no
+    /// `storage:` block.
+    Supabase,
 }
 
 impl Engine {
@@ -24,8 +27,38 @@ impl Engine {
         match self {
             Engine::Postgres => "postgres",
             Engine::Mysql => "mysql",
+            Engine::Supabase => "supabase",
         }
     }
+
+    /// The wire protocol to speak. Supabase is Postgres.
+    pub fn dialect(self) -> Engine {
+        match self {
+            Engine::Supabase => Engine::Postgres,
+            other => other,
+        }
+    }
+
+    /// Whether this engine implies object storage.
+    pub fn has_storage(self) -> bool {
+        matches!(self, Engine::Supabase)
+    }
+}
+
+/// Defaults a Supabase source gets for free.
+pub mod supabase {
+    pub const DB_URL_VARS: &[&str] = &["SUPABASE_DB_URL", "DATABASE_URL"];
+    pub const URL_VARS: &[&str] = &[
+        "SUPABASE_URL",
+        "NEXT_PUBLIC_SUPABASE_URL",
+        "VITE_SUPABASE_URL",
+        "PUBLIC_SUPABASE_URL",
+    ];
+    pub const KEY_VARS: &[&str] = &[
+        "SUPABASE_SERVICE_ROLE_KEY",
+        "SUPABASE_SECRET_KEY",
+        "SERVICE_ROLE_KEY",
+    ];
 }
 
 /// Output format for a table's seed file.
@@ -36,7 +69,7 @@ pub enum Format {
     Jsonl,
     Csv,
     Sql,
-    /// Only valid with `layout: per_row` — a whole file is one JSON object.
+    /// Only valid with `layout: per_row`, a whole file is one JSON object.
     Json,
 }
 
@@ -64,7 +97,7 @@ pub enum Layout {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum JsonMode {
-    /// Embed as a nested JSON value — readable and diffable.
+    /// Embed as a nested JSON value, readable and diffable.
     Unroll,
     /// Keep as an escaped JSON string, byte-identical to what the DB returned.
     String,
@@ -116,10 +149,13 @@ pub struct SourceConfig {
     /// Path to a `.env` holding the credentials, relative to the config file.
     #[serde(default)]
     pub env_file: Option<PathBuf>,
+    /// Read credentials from the process environment instead of a file.
+    #[serde(default)]
+    pub process_env: bool,
     /// Variable inside `env_file` (or the process env) holding the URL.
     #[serde(default)]
     pub url_var: Option<String>,
-    /// Literal connection URL. Discouraged — it puts credentials in git.
+    /// Literal connection URL. Discouraged, it puts credentials in git.
     #[serde(default)]
     pub url: Option<String>,
     /// Refuse any write (`load`) against this source.
@@ -346,11 +382,19 @@ impl Config {
         }
 
         for (name, src) in &self.sources {
-            if src.url.is_none() && src.env_file.is_none() && src.url_var.is_none() {
+            let has_source = src.url.is_some()
+                || src.env_file.is_some()
+                || src.url_var.is_some()
+                || src.process_env
+                || src.engine == Engine::Supabase;
+            if !has_source {
                 bail!(
-                    "source {name:?} specifies no credentials: set one of `url`, \
-                     `env_file`, or `url_var`"
+                    "source {name:?} specifies no credentials: set `env_file`, \
+                     `process_env: true`, `url_var`, or `url`"
                 );
+            }
+            if src.process_env && src.env_file.is_some() {
+                bail!("source {name:?} sets both `env_file` and `process_env`; pick one");
             }
         }
 
@@ -358,14 +402,14 @@ impl Config {
             let without: Vec<&str> = self
                 .sources
                 .iter()
-                .filter(|(_, s)| s.storage.is_none())
+                .filter(|(_, s)| s.storage.is_none() && !s.engine.has_storage())
                 .map(|(n, _)| n.as_str())
                 .collect();
             if !without.is_empty() {
                 bail!(
                     "the config declares buckets, but source{} {} define no `storage:` block, \
                      so bucket objects cannot be read or written there.\n\
-                     Add `storage: {{url_var: ..., key_var: ...}}` to each source, or remove the \
+                     Add a `storage:` block, use `engine: supabase`, or remove the \
                      `buckets:` section.",
                     if without.len() == 1 { "" } else { "s" },
                     without.join(", ")
@@ -432,7 +476,7 @@ impl Config {
                 bail!(
                     "table {key:?} sets `pretty: true` but `format: {}`; pretty-printing \
                      requires `format: json` with `layout: per_row` (jsonl is one line per row \
-                     by definition — use `json: unroll` for readable nested values there)",
+                     by definition, use `json: unroll` for readable nested values there)",
                     format.extension()
                 );
             }

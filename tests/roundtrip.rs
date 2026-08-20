@@ -293,8 +293,7 @@ fn identity_sequences_are_advanced_past_the_loaded_rows() {
     f.ok(&["export", "-q"]);
     f.ok(&["load", "--source", "dst", "--yes", "-q"]);
 
-    // Without a sequence fixup this insert reuses id 1 and violates the key —
-    // the classic seed-tool footgun.
+    // Without the sequence fixup this insert reuses id 1 and violates the key.
     let new_id = f.query_dst("INSERT INTO orgs (name) VALUES ('Fresh') RETURNING id");
     assert_eq!(
         new_id, "4",
