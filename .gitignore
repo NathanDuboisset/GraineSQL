@@ -15,6 +15,9 @@
 /out-*
 /seed_data
 
+# Local notes, not part of the published project
+/TODO.md
+
 # Editors and OS noise
 .DS_Store
 *.swp

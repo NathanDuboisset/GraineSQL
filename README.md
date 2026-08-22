@@ -380,11 +380,6 @@ decoder at once and fails on any asymmetry between them.
 - Postgres `numeric` NaN and exponent-form decimals are written as quoted strings
   in JSON, since neither survives a JSON number token unchanged.
 
-## Roadmap
-
-See [TODO.md](TODO.md). Nearest items: SQLite, anonymisation, and walking
-foreign keys to pull in missing parents rather than only reporting them.
-
 ## Licence
 
 [PolyForm Noncommercial 1.0.0](LICENSE), **source-available, not open source**.
