@@ -266,7 +266,7 @@ fn psql(url: &str, sql: &str) -> Result<String, String> {
 }
 
 /// Path to the seedle binary under test.
-fn seedle_bin() -> PathBuf {
+pub fn seedle_bin() -> PathBuf {
     // The test executable lives in target/<profile>/deps/, so the binary is two
     // levels up.
     let mut p = std::env::current_exe().expect("test exe path");

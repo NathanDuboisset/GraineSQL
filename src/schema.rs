@@ -356,6 +356,32 @@ impl Schema {
         })
     }
 
+    /// Move every table from schema `from` onto schema `to`.
+    ///
+    /// On MySQL the "schema" is the database name, so a seed exported from one
+    /// database would otherwise look entirely absent in another. Only the
+    /// default schema moves; anything explicitly elsewhere stays put.
+    pub fn rebase(&mut self, from: &str, to: &str) {
+        if from == to {
+            return;
+        }
+        let moved: IndexMap<TableId, Table> = self
+            .tables
+            .iter()
+            .map(|(id, table)| {
+                let mut table = table.clone();
+                let id = rebase_id(id, from, to);
+                for fk in &mut table.foreign_keys {
+                    fk.references = rebase_id(&fk.references, from, to);
+                }
+                table.id = id.clone();
+                (id, table)
+            })
+            .collect();
+        self.tables = moved;
+        self.default_schema = to.to_string();
+    }
+
     /// Resolve a possibly-unqualified id to the canonical id used as a key.
     pub fn resolve(&self, id: &TableId) -> Option<TableId> {
         if self.tables.contains_key(id) {
@@ -365,6 +391,15 @@ impl Schema {
             .keys()
             .find(|k| k.matches(id, &self.default_schema))
             .cloned()
+    }
+}
+
+/// One id moved from schema `from` to `to`, if it was there.
+fn rebase_id(id: &TableId, from: &str, to: &str) -> TableId {
+    match id.schema.as_deref() {
+        Some(s) if s == from => TableId::new(to, &id.name),
+        None => TableId::new(to, &id.name),
+        _ => id.clone(),
     }
 }
 

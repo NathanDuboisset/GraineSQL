@@ -7,10 +7,12 @@
 
 pub mod mysql;
 pub mod postgres;
+pub mod sqlite;
 
 use anyhow::{Context, Result};
 use sqlx::mysql::{MySqlPool, MySqlPoolOptions};
 use sqlx::postgres::{PgPool, PgPoolOptions};
+use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use sqlx::{Executor, Row};
 
 use std::collections::BTreeSet;
@@ -44,6 +46,39 @@ fn edit_distance(a: &str, b: &str) -> usize {
         std::mem::swap(&mut prev, &mut cur);
     }
     prev[b.len()]
+}
+
+/// Introspect the live schema. The single dispatch point per engine.
+pub async fn introspect(db: &Db) -> Result<Schema> {
+    match db.engine().dialect() {
+        Engine::Mysql => mysql::introspect(db).await,
+        Engine::Sqlite => sqlite::introspect(db).await,
+        _ => postgres::introspect(db).await,
+    }
+}
+
+/// Every user table, for `seedle init` and `seedle add`.
+pub async fn list_tables(db: &Db) -> Result<Vec<TableId>> {
+    match db.engine().dialect() {
+        Engine::Mysql => mysql::list_tables(db).await,
+        Engine::Sqlite => sqlite::list_tables(db).await,
+        _ => postgres::list_tables(db).await,
+    }
+}
+
+/// The schema new objects land in when unqualified.
+pub async fn default_schema(db: &Db) -> Result<String> {
+    let sql = match db.engine().dialect() {
+        Engine::Mysql => "SELECT DATABASE()",
+        Engine::Sqlite => return Ok(sqlite::SCHEMA.to_string()),
+        _ => "SELECT current_schema()",
+    };
+    Ok(db
+        .query_text(sql)
+        .await?
+        .first()
+        .and_then(|r| r.first().cloned().flatten())
+        .unwrap_or_default())
 }
 
 /// Enum type name a class refers to, looking through arrays.
@@ -184,6 +219,7 @@ pub fn prune(schema: &Schema, wanted: &[TableId]) -> Result<(Schema, Option<Miss
 pub enum Pool {
     Pg(PgPool),
     My(MySqlPool),
+    Lite(SqlitePool),
 }
 
 pub struct Db {
@@ -204,8 +240,25 @@ impl Db {
         let max_conns = max_conns.max(1);
 
         let pool = match src.engine.dialect() {
-            Engine::Postgres | Engine::Supabase => Pool::Pg(
-                PgPoolOptions::new()
+            Engine::Sqlite => Pool::Lite(
+                SqlitePoolOptions::new()
+                    .max_connections(max_conns)
+                    .after_connect(move |conn, _| {
+                        Box::pin(async move {
+                            for stmt in setup {
+                                conn.execute(*stmt).await?;
+                            }
+                            Ok(())
+                        })
+                    })
+                    .connect(&src.url)
+                    .await
+                    .with_context(|| {
+                        format!("opening source {:?} at {}", src.name, src.redacted_url())
+                    })?,
+            ),
+            Engine::Mysql => Pool::My(
+                MySqlPoolOptions::new()
                     .max_connections(max_conns)
                     .after_connect(move |conn, _| {
                         Box::pin(async move {
@@ -225,8 +278,8 @@ impl Db {
                         )
                     })?,
             ),
-            Engine::Mysql => Pool::My(
-                MySqlPoolOptions::new()
+            _ => Pool::Pg(
+                PgPoolOptions::new()
                     .max_connections(max_conns)
                     .after_connect(move |conn, _| {
                         Box::pin(async move {
@@ -265,7 +318,7 @@ impl Db {
 
     /// Round-trip check, used by `seedle sources`.
     pub async fn ping(&self) -> Result<String> {
-        let rows = self.query_text("SELECT version()").await?;
+        let rows = self.query_text(self.dialect.version_query()).await?;
         Ok(rows
             .first()
             .and_then(|r| r.first().cloned().flatten())
@@ -310,6 +363,14 @@ impl Db {
                     n += 1;
                 }
             }
+            Pool::Lite(p) => {
+                let mut stream = sqlx::query(sql).fetch(p);
+                while let Some(row) = stream.next().await {
+                    let row = row.with_context(|| failed_sql(sql))?;
+                    f(lite_row_to_text(&row)?)?;
+                    n += 1;
+                }
+            }
         }
         Ok(n)
     }
@@ -317,12 +378,17 @@ impl Db {
     /// Execute a statement with no parameters, returning rows affected.
     pub async fn execute(&self, sql: &str) -> Result<u64> {
         match &self.pool {
-            Pool::Pg(p) => Ok(sqlx::query(sql)
+            Pool::Pg(p) => Ok(sqlx::raw_sql(sql)
                 .execute(p)
                 .await
                 .with_context(|| failed_sql(sql))?
                 .rows_affected()),
-            Pool::My(p) => Ok(sqlx::query(sql)
+            Pool::My(p) => Ok(sqlx::raw_sql(sql)
+                .execute(p)
+                .await
+                .with_context(|| failed_sql(sql))?
+                .rows_affected()),
+            Pool::Lite(p) => Ok(sqlx::raw_sql(sql)
                 .execute(p)
                 .await
                 .with_context(|| failed_sql(sql))?
@@ -353,6 +419,16 @@ impl Db {
                     .with_context(|| failed_sql(sql))?
                     .rows_affected())
             }
+            Pool::Lite(p) => {
+                let mut q = sqlx::query(sql);
+                for b in binds {
+                    q = q.bind(b.clone());
+                }
+                Ok(q.execute(p)
+                    .await
+                    .with_context(|| failed_sql(sql))?
+                    .rows_affected())
+            }
         }
     }
 
@@ -365,6 +441,7 @@ impl Db {
         Ok(match &self.pool {
             Pool::Pg(p) => PinnedConn::Pg(p.acquire().await.context("acquiring a connection")?),
             Pool::My(p) => PinnedConn::My(p.acquire().await.context("acquiring a connection")?),
+            Pool::Lite(p) => PinnedConn::Lite(p.acquire().await.context("acquiring a connection")?),
         })
     }
 }
@@ -373,6 +450,7 @@ impl Db {
 pub enum PinnedConn<'a> {
     Pg(sqlx::pool::PoolConnection<sqlx::Postgres>),
     My(sqlx::pool::PoolConnection<sqlx::MySql>),
+    Lite(sqlx::pool::PoolConnection<sqlx::Sqlite>),
     #[allow(dead_code)]
     Phantom(std::marker::PhantomData<&'a ()>),
 }
@@ -380,12 +458,17 @@ pub enum PinnedConn<'a> {
 impl PinnedConn<'_> {
     pub async fn execute(&mut self, sql: &str) -> Result<u64> {
         match self {
-            PinnedConn::Pg(c) => Ok(sqlx::query(sql)
+            PinnedConn::Pg(c) => Ok(sqlx::raw_sql(sql)
                 .execute(&mut **c)
                 .await
                 .with_context(|| failed_sql(sql))?
                 .rows_affected()),
-            PinnedConn::My(c) => Ok(sqlx::query(sql)
+            PinnedConn::My(c) => Ok(sqlx::raw_sql(sql)
+                .execute(&mut **c)
+                .await
+                .with_context(|| failed_sql(sql))?
+                .rows_affected()),
+            PinnedConn::Lite(c) => Ok(sqlx::raw_sql(sql)
                 .execute(&mut **c)
                 .await
                 .with_context(|| failed_sql(sql))?
@@ -416,6 +499,16 @@ impl PinnedConn<'_> {
                     .with_context(|| failed_sql(sql))?
                     .rows_affected())
             }
+            PinnedConn::Lite(c) => {
+                let mut q = sqlx::query(sql);
+                for b in binds {
+                    q = q.bind(b.clone());
+                }
+                Ok(q.execute(&mut **c)
+                    .await
+                    .with_context(|| failed_sql(sql))?
+                    .rows_affected())
+            }
             PinnedConn::Phantom(_) => unreachable!("phantom variant is never constructed"),
         }
     }
@@ -435,6 +528,13 @@ impl PinnedConn<'_> {
                     .await
                     .with_context(|| failed_sql(sql))?;
                 rows.iter().map(my_row_to_text).collect()
+            }
+            PinnedConn::Lite(c) => {
+                let rows = sqlx::query(sql)
+                    .fetch_all(&mut **c)
+                    .await
+                    .with_context(|| failed_sql(sql))?;
+                rows.iter().map(lite_row_to_text).collect()
             }
             PinnedConn::Phantom(_) => unreachable!("phantom variant is never constructed"),
         }
@@ -458,6 +558,36 @@ fn pg_row_to_text(row: &sqlx::postgres::PgRow) -> Result<TextRow> {
 
 fn my_row_to_text(row: &sqlx::mysql::MySqlRow) -> Result<TextRow> {
     (0..row.len()).map(|i| text_at(row, i)).collect()
+}
+
+/// SQLite stores whatever was written, regardless of the declared type, so a
+/// `PRAGMA` result or a loosely-typed column can arrive as any of the storage
+/// classes. Each is tried in turn rather than assuming one.
+fn lite_row_to_text(row: &sqlx::sqlite::SqliteRow) -> Result<TextRow> {
+    (0..row.len())
+        .map(|i| {
+            if let Ok(v) = row.try_get::<Option<String>, _>(i) {
+                return Ok(v);
+            }
+            if let Ok(v) = row.try_get::<Option<i64>, _>(i) {
+                return Ok(v.map(|n| n.to_string()));
+            }
+            if let Ok(v) = row.try_get::<Option<f64>, _>(i) {
+                return Ok(v.map(crate::value::format_float));
+            }
+            let raw: Option<Vec<u8>> = row
+                .try_get(i)
+                .with_context(|| format!("reading column {i}"))?;
+            match raw {
+                None => Ok(None),
+                Some(b) => {
+                    Ok(Some(String::from_utf8(b).with_context(|| {
+                        format!("column {i} is not valid UTF-8")
+                    })?))
+                }
+            }
+        })
+        .collect()
 }
 
 /// Read column `i` as text.

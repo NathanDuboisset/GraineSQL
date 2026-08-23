@@ -57,7 +57,7 @@ serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision
 serde_yaml_ng = "0.10"
 sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = [
-    "runtime-tokio", "tls-rustls-ring", "postgres", "mysql",
+    "runtime-tokio", "tls-rustls-ring", "postgres", "mysql", "sqlite",
     "uuid", "chrono", "rust_decimal", "json",
 ] }
 thiserror = "2"
@@ -68,4 +68,10 @@ uuid = { version = "1", features = ["serde"] }
 
 [dev-dependencies]
 sha2 = "0.10"
+# The MySQL test harness talks to the server directly rather than shelling out
+# to a client that may not be installed.
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio", "tls-rustls-ring", "mysql",
+] }
 tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

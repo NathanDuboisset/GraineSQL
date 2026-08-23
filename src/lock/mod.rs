@@ -38,8 +38,6 @@ pub struct Lock {
     pub fingerprint: String,
     /// Load order: parents first. This is why data files can keep plain names.
     pub order: Vec<TableId>,
-    /// The default schema of the source this lock was taken from.
-    pub default_schema: String,
     pub schema: IndexMap<TableId, Table>,
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub enums: IndexMap<String, Vec<String>>,
@@ -73,9 +71,11 @@ impl Lock {
             version: LOCK_VERSION,
             engine,
             fingerprint: String::new(),
-            order: order.to_vec(),
-            default_schema: schema.default_schema.clone(),
-            schema: schema.tables.clone(),
+            order: order
+                .iter()
+                .map(|id| relative(id, &schema.default_schema))
+                .collect(),
+            schema: relative_tables(schema),
             enums: schema.enums.clone(),
             files: IndexMap::new(),
             buckets: IndexMap::new(),
@@ -85,15 +85,37 @@ impl Lock {
         lock
     }
 
-    /// The schema section as a [`Schema`], for comparison against a live one.
-    pub fn to_schema(&self) -> Schema {
+    /// The schema section as a [`Schema`], qualified against `default_schema`.
+    ///
+    /// Tables are stored relative to whatever schema they came from, so the same
+    /// structure locks identically whatever the database is called. That matters
+    /// because the database a seed is exported from is rarely the one it loads
+    /// into, and on MySQL the database name *is* the schema name.
+    pub fn to_schema_in(&self, default_schema: &str) -> Schema {
         let mut s = Schema {
-            default_schema: self.default_schema.clone(),
+            default_schema: default_schema.to_string(),
             tables: self.schema.clone(),
             enums: self.enums.clone(),
         };
+        s.rebase("", default_schema);
         s.hydrate();
         s
+    }
+
+    /// The schema section, qualified to match a live schema.
+    pub fn to_schema_for(&self, live: &Schema) -> Schema {
+        self.to_schema_in(&live.default_schema)
+    }
+
+    /// The load order, qualified against `default_schema`.
+    pub fn order_in(&self, default_schema: &str) -> Vec<TableId> {
+        self.order
+            .iter()
+            .map(|id| match id.schema.as_deref() {
+                None => TableId::new(default_schema, &id.name),
+                Some(_) => id.clone(),
+            })
+            .collect()
     }
 
     pub fn read(path: &Path) -> Result<Lock> {
@@ -138,8 +160,9 @@ impl Lock {
     /// still export identically. Columns the lock does not know about are
     /// appended in live order, so a newly added one is still exported.
     pub fn align_column_order(&self, live: &mut Schema) {
+        let default = live.default_schema.clone();
         for (id, table) in live.tables.iter_mut() {
-            let Some(locked) = self.schema.get(id) else {
+            let Some(locked) = self.schema.get(&relative(id, &default)) else {
                 continue;
             };
             let mut ordered: Vec<crate::schema::Column> = Vec::with_capacity(table.columns.len());
@@ -155,16 +178,42 @@ impl Lock {
     }
 }
 
+/// Drop the default schema from an id, so the lock does not record which
+/// database it happened to come from.
+pub fn relative(id: &TableId, default_schema: &str) -> TableId {
+    match id.schema.as_deref() {
+        Some(s) if s == default_schema => TableId::bare(&id.name),
+        None => TableId::bare(&id.name),
+        Some(_) => id.clone(),
+    }
+}
+
+fn relative_tables(schema: &Schema) -> IndexMap<TableId, Table> {
+    schema
+        .tables
+        .iter()
+        .map(|(id, table)| {
+            let mut table = table.clone();
+            for fk in &mut table.foreign_keys {
+                fk.references = relative(&fk.references, &schema.default_schema);
+            }
+            let id = relative(id, &schema.default_schema);
+            table.id = id.clone();
+            (id, table)
+        })
+        .collect()
+}
+
 /// Hash a schema into a short, stable identifier.
 ///
 /// Built from a canonical rendering rather than the serialized YAML so that
 /// formatting changes in the writer never look like schema drift.
 pub fn fingerprint_schema(schema: &Schema) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(schema.default_schema.as_bytes());
-    hasher.update(b"\n");
-    // IndexMap preserves introspection's sorted order, so this is reproducible.
-    for (id, table) in &schema.tables {
+    // The database name is deliberately excluded: the same structure must
+    // fingerprint the same wherever it lives, or `lock --check` in CI fails on
+    // any database not named like the one the lock was taken from.
+    for (id, table) in &relative_tables(schema) {
         hasher.update(id.to_string().as_bytes());
         hasher.update(b"\n");
         hasher.update(fingerprint_table(table).as_bytes());
@@ -374,22 +423,48 @@ mod tests {
             !yaml.contains("id: public.users"),
             "id should not be serialized:\n{yaml}"
         );
-        assert_eq!(
-            back.schema[&TableId::new("public", "users")].id.name,
-            "users"
-        );
+        assert_eq!(back.schema[&TableId::bare("users")].id.name, "users");
     }
 
     #[test]
-    fn lock_preserves_order_exactly() {
+    fn the_lock_stores_names_relative_to_the_default_schema() {
         let s = schema(vec![table("users"), table("orgs")]);
         let order = vec![
             TableId::new("public", "orgs"),
             TableId::new("public", "users"),
         ];
         let lock = Lock::build(Engine::Postgres, &s, &order);
-        assert_eq!(lock.order, order);
-        assert_eq!(lock.to_schema().tables.len(), 2);
+
+        // Stored bare, so the lock does not record which database it came from.
+        assert_eq!(
+            lock.order,
+            vec![TableId::bare("orgs"), TableId::bare("users")]
+        );
+        assert!(lock.schema.contains_key(&TableId::bare("users")));
+
+        // And qualified again on the way out.
+        assert_eq!(lock.order_in("public"), order);
+        assert_eq!(lock.to_schema_in("public").tables.len(), 2);
+        assert!(
+            lock.to_schema_in("app")
+                .tables
+                .contains_key(&TableId::new("app", "users"))
+        );
+    }
+
+    #[test]
+    fn the_same_structure_fingerprints_the_same_in_any_database() {
+        // Otherwise `lock --check` fails in CI against any database not named
+        // like the one the lock was taken from, which on MySQL is every one.
+        let mut a = schema(vec![table("users")]);
+        let mut b = a.clone();
+        b.rebase("public", "seedle_dst");
+
+        assert_eq!(fingerprint_schema(&a), fingerprint_schema(&b));
+
+        // A real structural change still shows.
+        a.tables[0].columns.pop();
+        assert_ne!(fingerprint_schema(&a), fingerprint_schema(&b));
     }
 
     #[test]

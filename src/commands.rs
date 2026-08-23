@@ -81,15 +81,21 @@ impl Ctx {
             eprintln!("{}", msg.as_ref());
         }
     }
+
+    /// Ask a yes/no question, honouring `--yes`.
+    pub fn confirm(&self, prompt: &str) -> Result<bool> {
+        if self.assume_yes {
+            self.warn(format!("{prompt} yes (--yes)"));
+            return Ok(true);
+        }
+        confirm(prompt)
+    }
 }
 
 /// Introspect the live schema, pruned to the configured tables and their
 /// foreign-key closure.
 pub async fn introspect(db: &Db, cfg: &Config) -> Result<Schema> {
-    let full = match db.engine().dialect() {
-        Engine::Mysql => db::mysql::introspect(db).await?,
-        _ => db::postgres::introspect(db).await?,
-    };
+    let full = db::introspect(db).await?;
     let wanted: Vec<TableId> = cfg.resolved_tables()?.into_iter().map(|t| t.id).collect();
     let (mut live, missing) = db::prune(&full, &wanted)?;
 
@@ -104,7 +110,7 @@ pub async fn introspect(db: &Db, cfg: &Config) -> Result<Schema> {
             Some(lock) => missing
                 .wanted
                 .iter()
-                .filter(|id| lock.to_schema().resolve(id).is_none())
+                .filter(|id| lock.to_schema_for(&live).resolve(id).is_none())
                 .cloned()
                 .collect(),
             None => missing.wanted.clone(),
@@ -166,7 +172,7 @@ pub fn gate_on_drift_with_buckets(
     live_buckets: &IndexMap<String, storage::BucketSettings>,
     force: bool,
 ) -> Result<drift::Report> {
-    let mut report = drift::classify(&lock.to_schema(), live);
+    let mut report = drift::classify(&lock.to_schema_for(live), live);
 
     if !lock.buckets.is_empty() || !live_buckets.is_empty() {
         let largest: IndexMap<String, u64> = lock
@@ -203,10 +209,15 @@ pub fn gate_on_drift_with_buckets(
 
     if report.has_breaking() {
         ctx.warn("proceeding past breaking drift because --force was given");
-    } else if report.needs_confirmation() && !force && !ctx.assume_yes {
-        // Data loss, not a failed load: the user decides.
-        if !confirm("Discard that data and continue?")? {
-            bail!("aborted; nothing was changed");
+        return Ok(report);
+    }
+
+    // One prompt per change, so accepting the loss of one column is never taken
+    // as accepting the loss of another.
+    for d in report.confirm() {
+        let accepted = ctx.confirm(&format!("{}: {}. Accept?", d.target, d.what))?;
+        if !accepted {
+            bail!("declined {} ({}); nothing was changed", d.target, d.what);
         }
     }
     Ok(report)
@@ -350,7 +361,7 @@ pub async fn cmd_lock(ctx: &Ctx, check: bool) -> Result<()> {
 
     if check {
         let existing = Lock::read(&lock_path)?;
-        let report = drift::classify(&existing.to_schema(), &live);
+        let report = drift::classify(&existing.to_schema_for(&live), &live);
         if ctx.json {
             println!("{}", drift_json(&report));
         } else {
@@ -392,7 +403,7 @@ pub async fn cmd_lock(ctx: &Ctx, check: bool) -> Result<()> {
             lock.fingerprint
         )),
         Some(prev) => {
-            let report = drift::classify(&prev.to_schema(), &live);
+            let report = drift::classify(&prev.to_schema_for(&live), &live);
             ctx.say(format!(
                 "updated {} ({} -> {})\n{}",
                 lock_path.display(),
@@ -409,7 +420,7 @@ pub async fn cmd_diff(ctx: &Ctx) -> Result<()> {
     let (_src, db) = ctx.connect(1).await?;
     let live = introspect(&db, &ctx.cfg).await?;
     let lock = Lock::read(&ctx.cfg.lock_path())?;
-    let report = drift::classify(&lock.to_schema(), &live);
+    let report = drift::classify(&lock.to_schema_for(&live), &live);
 
     if ctx.json {
         println!("{}", drift_json(&report));
@@ -568,7 +579,7 @@ pub async fn cmd_export(
         total_rows += exported.rows;
 
         files.insert(
-            exported.table.clone(),
+            crate::lock::relative(&exported.table, &live.default_schema),
             FileEntry {
                 path: export::lock_path(&exported, cfg, &live.default_schema),
                 rows: exported.rows,
@@ -951,7 +962,6 @@ pub async fn cmd_load(
     no_transaction: bool,
     force: bool,
 ) -> Result<()> {
-    let yes = ctx.assume_yes;
     let src = ctx.resolve_source()?;
     load::check_writable(&src)?;
 
@@ -970,14 +980,13 @@ pub async fn cmd_load(
     }
 
     let reasons = load::confirmation_reasons(&src, &plans);
-    if !reasons.is_empty() && !yes && !dry_run {
+    if !reasons.is_empty() && !dry_run {
         ctx.say(load::render_plan(&db.source_name, &plans));
-        for r in &reasons {
-            ctx.warn(format!("  ! {r}"));
-        }
-        if !confirm("Proceed?")? {
-            ctx.say("aborted");
-            return Ok(());
+        for reason in &reasons {
+            if !ctx.confirm(&format!("{reason}. Accept?"))? {
+                ctx.say("aborted; nothing was changed");
+                return Ok(());
+            }
         }
     }
 
@@ -997,7 +1006,7 @@ pub async fn cmd_load(
     let mut restored = false;
     if !cycles.is_empty() {
         let all_deferrable = cycles.iter().all(|c| c.all_deferrable);
-        match load::defer_constraints(db.engine(), all_deferrable) {
+        match db.dialect().defer_constraints(all_deferrable) {
             Some(stmt) => {
                 conn.execute(stmt).await.with_context(|| {
                     format!("deferring constraints for a foreign-key cycle: {stmt}")
@@ -1087,18 +1096,18 @@ pub async fn cmd_load(
         ));
     }
 
-    if restored && let Some(stmt) = load::restore_constraints(db.engine()) {
+    if restored && let Some(stmt) = db.dialect().restore_constraints() {
         conn.execute(stmt).await?;
     }
 
     // Sequence fixup belongs inside the transaction wherever the engine allows
     // it, so a rollback undoes it too.
-    let deferred_fixups = load::fixup_after_commit(db.engine());
+    let deferred_fixups = db.dialect().fixup_after_commit();
     if ctx.cfg.load.fix_sequences && !deferred_fixups {
         for (cfg, _) in &loads {
             let id = live.resolve(&cfg.id).unwrap_or_else(|| cfg.id.clone());
             let Some(table) = live.get(&id) else { continue };
-            for stmt in load::sequence_fixups(db.engine(), table) {
+            for stmt in db.dialect().sequence_fixups(table) {
                 conn.execute(&stmt)
                     .await
                     .with_context(|| format!("advancing the sequence for {}", table.id))?;
@@ -1203,10 +1212,11 @@ pub async fn cmd_load(
 
 fn confirm(prompt: &str) -> Result<bool> {
     if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-        bail!("{prompt} refusing to continue without a terminal to confirm on; pass --yes");
+        bail!("{prompt} (no terminal to ask on; pass --yes to accept)");
     }
-    print!("{prompt} [y/N] ");
-    std::io::stdout().flush()?;
+    // Prompt on stderr so it never contaminates piped output.
+    eprint!("{prompt} [y/N] ");
+    std::io::stderr().flush()?;
     let mut answer = String::new();
     std::io::stdin().read_line(&mut answer)?;
     Ok(matches!(
@@ -1222,7 +1232,8 @@ fn confirm(prompt: &str) -> Result<bool> {
 pub fn cmd_verify(ctx: &Ctx) -> Result<()> {
     let lock = Lock::read(&ctx.cfg.lock_path())?;
     let out_dir = ctx.cfg.out_dir();
-    let schema = lock.to_schema();
+    // verify needs no database, so bare ids stand for themselves.
+    let schema = lock.to_schema_in("");
     let selected = ctx.cfg.resolved_tables()?;
 
     let mut problems: Vec<String> = Vec::new();
@@ -1233,7 +1244,10 @@ pub fn cmd_verify(ctx: &Ctx) -> Result<()> {
             problems.push(format!("{}: not in seedle.lock", cfg.id));
             continue;
         };
-        let Some(entry) = lock.files.get(&id) else {
+        let Some(entry) = lock
+            .files
+            .get(&crate::lock::relative(&id, &schema.default_schema))
+        else {
             problems.push(format!(
                 "{id}: no file recorded in seedle.lock (run `seedle export`)"
             ));
@@ -1372,11 +1386,7 @@ pub async fn cmd_init(cli: &Cli, url: Option<String>, force: bool) -> Result<()>
     let mut default_schema = String::from("public");
 
     if let Some(url) = &url {
-        engine = if url.starts_with("mysql") || url.starts_with("mariadb") {
-            Engine::Mysql
-        } else {
-            Engine::Postgres
-        };
+        engine = Engine::from_url(url);
         let src = ResolvedSource {
             name: "init".into(),
             engine,
@@ -1386,20 +1396,8 @@ pub async fn cmd_init(cli: &Cli, url: Option<String>, force: bool) -> Result<()>
             storage: None,
         };
         let db = Db::connect(&src).await?;
-        tables = match engine.dialect() {
-            Engine::Mysql => db::mysql::list_tables(&db).await?,
-            _ => db::postgres::list_tables(&db).await?,
-        };
-        default_schema = db
-            .query_text(match engine.dialect() {
-                Engine::Mysql => "SELECT DATABASE()",
-                _ => "SELECT current_schema()",
-            })
-            .await
-            .unwrap_or_default()
-            .first()
-            .and_then(|r| r.first().cloned().flatten())
-            .unwrap_or_else(|| default_schema.clone());
+        tables = db::list_tables(&db).await?;
+        default_schema = db::default_schema(&db).await.unwrap_or(default_schema);
     }
 
     let table_block = if tables.is_empty() {

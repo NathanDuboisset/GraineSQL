@@ -227,9 +227,10 @@ fn read_env_file(path: &Path) -> Result<BTreeMap<String, String>> {
 fn check_scheme(name: &str, engine: Engine, url: &str) -> Result<()> {
     let scheme = url.split_once("://").map(|(s, _)| s).unwrap_or("");
     let ok = match engine.dialect() {
-        Engine::Postgres => matches!(scheme, "postgres" | "postgresql"),
         Engine::Mysql => matches!(scheme, "mysql" | "mariadb"),
-        Engine::Supabase => unreachable!("dialect() never returns Supabase"),
+        // A path with no scheme is the common way to name a database file.
+        Engine::Sqlite => scheme.is_empty() || scheme == "sqlite",
+        _ => matches!(scheme, "postgres" | "postgresql"),
     };
     if !ok {
         bail!(

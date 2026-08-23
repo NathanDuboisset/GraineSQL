@@ -7,7 +7,7 @@
 
 use anyhow::{Context, Result, bail};
 
-use crate::config::{Engine, LoadMode, ResolvedTable};
+use crate::config::{LoadMode, ResolvedTable};
 use crate::db::PinnedConn;
 use crate::dialect::Dialect;
 use crate::schema::{Column, Table, TableId};
@@ -249,30 +249,11 @@ pub async fn load_table(
     })
 }
 
-/// Statements that advance identity sequences past the loaded keys.
-///
-/// Postgres only: `setval` is an ordinary function call, so it composes into one
-/// self-contained statement that runs inside the transaction. MySQL needs a
-/// read-then-ALTER pair instead, see [`mysql_fixups`].
-///
-/// Without this the application's next insert collides with a seed row, the
-/// classic seed-tool footgun.
-pub fn sequence_fixups(engine: Engine, table: &Table) -> Vec<String> {
-    if engine.dialect() != Engine::Postgres {
-        return Vec::new();
-    }
-    table
-        .identity_columns()
-        .map(|c| crate::db::postgres::fix_sequence_sql(&table.id, &c.name))
-        .collect()
-}
-
 /// Columns whose MySQL `AUTO_INCREMENT` needs resetting after a load.
 ///
-/// MySQL cannot parameterise or subquery an `AUTO_INCREMENT` assignment, so the
-/// value has to be read first and substituted into DDL, and `ALTER TABLE`
-/// performs an implicit commit, so the whole pair has to run after the load's
-/// transaction rather than inside it.
+/// MySQL cannot parameterise an `AUTO_INCREMENT` assignment, so the value is
+/// read first and substituted into DDL, and `ALTER TABLE` commits implicitly,
+/// so the pair runs after the load's transaction.
 pub fn mysql_fixups(table: &Table) -> Vec<(TableId, String)> {
     table
         .identity_columns()
@@ -301,34 +282,6 @@ pub async fn fix_mysql_auto_increment(
     Ok(())
 }
 
-/// Whether sequence fixup for this engine has to wait until after the commit.
-pub fn fixup_after_commit(engine: Engine) -> bool {
-    // `ALTER TABLE` implicitly commits on MySQL, which would silently split the
-    // load into two transactions.
-    matches!(engine.dialect(), Engine::Mysql)
-}
-
-/// Session statements needed to load a set of tables whose foreign keys form a
-/// cycle, or `None` when the engine cannot do it.
-pub fn defer_constraints(engine: Engine, all_deferrable: bool) -> Option<&'static str> {
-    match engine.dialect() {
-        // Only DEFERRABLE constraints can actually be deferred; Postgres errors
-        // otherwise rather than silently ignoring the request.
-        Engine::Mysql => Some("SET FOREIGN_KEY_CHECKS = 0"),
-        _ if all_deferrable => Some("SET CONSTRAINTS ALL DEFERRED"),
-        _ => None,
-    }
-}
-
-/// Restore the constraint setting after a load, when one was changed.
-pub fn restore_constraints(engine: Engine) -> Option<&'static str> {
-    match engine.dialect() {
-        Engine::Mysql => Some("SET FOREIGN_KEY_CHECKS = 1"),
-        // Deferred constraints die with the transaction.
-        _ => None,
-    }
-}
-
 /// Refuse to write to a source marked read-only.
 pub fn check_writable(src: &crate::source::ResolvedSource) -> Result<()> {
     if src.read_only {
@@ -351,6 +304,8 @@ pub fn confirmation_reasons(
     src: &crate::source::ResolvedSource,
     plans: &[TablePlan],
 ) -> Vec<String> {
+    // One entry per thing to accept, so agreeing to empty one table is never
+    // taken as agreeing to empty another.
     let mut reasons = Vec::new();
     if !src.is_local() {
         reasons.push(format!(
@@ -359,17 +314,10 @@ pub fn confirmation_reasons(
             src.redacted_url()
         ));
     }
-    let truncating: Vec<String> = plans
-        .iter()
-        .filter(|p| p.mode == LoadMode::TruncateFirst)
-        .map(|p| p.table.to_string())
-        .collect();
-    if !truncating.is_empty() {
+    for p in plans.iter().filter(|p| p.mode == LoadMode::TruncateFirst) {
         reasons.push(format!(
-            "{} table{} will be emptied first: {}",
-            truncating.len(),
-            if truncating.len() == 1 { "" } else { "s" },
-            truncating.join(", ")
+            "{} will be emptied first, discarding every row it holds",
+            p.table
         ));
     }
     reasons
@@ -414,8 +362,9 @@ pub fn render_plan(source_name: &str, plans: &[TablePlan]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Engine;
     use crate::config::{Format, JsonMode, Layout};
-    use crate::dialect::{Mysql, Postgres};
+    use crate::dialect::{Mysql, Postgres, Sqlite};
     use crate::schema::TypeClass;
 
     /// `sql_type` mirrors what `format_type()` reports, since that is what the
@@ -642,56 +591,66 @@ mod tests {
 
     #[test]
     fn identity_columns_get_a_sequence_fixup() {
-        let fixups = sequence_fixups(Engine::Postgres, &users());
+        let fixups = Postgres.sequence_fixups(&users());
         assert_eq!(fixups.len(), 1);
         assert!(fixups[0].contains("setval"), "{}", fixups[0]);
 
-        // MySQL needs the read-then-ALTER pair instead, so it produces no
+        // MySQL needs a read-then-ALTER pair instead, so it produces no
         // in-transaction statement.
-        assert!(sequence_fixups(Engine::Mysql, &users()).is_empty());
+        assert!(Mysql.sequence_fixups(&users()).is_empty());
         assert_eq!(mysql_fixups(&users()).len(), 1);
         assert_eq!(mysql_fixups(&users())[0].1, "id");
+
+        assert!(Sqlite.sequence_fixups(&users())[0].contains("sqlite_sequence"));
     }
 
     #[test]
     fn a_table_without_an_identity_column_needs_no_fixup() {
         let mut t = users();
         t.columns[0].identity = false;
-        assert!(sequence_fixups(Engine::Postgres, &t).is_empty());
+        assert!(Postgres.sequence_fixups(&t).is_empty());
+        assert!(Sqlite.sequence_fixups(&t).is_empty());
     }
 
     #[test]
-    fn mysql_sequence_fixup_is_deferred_past_the_commit() {
-        // ALTER TABLE implicitly commits on MySQL, so running it inside the
+    fn only_mysql_defers_its_fixup_past_the_commit() {
+        // ALTER TABLE commits implicitly on MySQL, so running it inside the
         // transaction would silently break atomicity.
-        assert!(fixup_after_commit(Engine::Mysql));
-        assert!(!fixup_after_commit(Engine::Postgres));
+        assert!(Mysql.fixup_after_commit());
+        assert!(!Postgres.fixup_after_commit());
+        assert!(!Sqlite.fixup_after_commit());
     }
 
     #[test]
     fn postgres_only_defers_constraints_that_are_actually_deferrable() {
         assert_eq!(
-            defer_constraints(Engine::Postgres, true),
+            Postgres.defer_constraints(true),
             Some("SET CONSTRAINTS ALL DEFERRED")
         );
         assert_eq!(
-            defer_constraints(Engine::Postgres, false),
+            Postgres.defer_constraints(false),
             None,
-            "asking Postgres to defer a non-deferrable constraint is an error, not a no-op"
+            "asking Postgres to defer a non-deferrable constraint is an error"
         );
     }
 
     #[test]
-    fn mysql_can_always_disable_foreign_key_checks_and_restores_them() {
+    fn the_other_engines_can_always_suspend_key_checking() {
         assert_eq!(
-            defer_constraints(Engine::Mysql, false),
+            Mysql.defer_constraints(false),
             Some("SET FOREIGN_KEY_CHECKS = 0")
         );
         assert_eq!(
-            restore_constraints(Engine::Mysql),
+            Mysql.restore_constraints(),
             Some("SET FOREIGN_KEY_CHECKS = 1")
         );
-        assert_eq!(restore_constraints(Engine::Postgres), None);
+        assert_eq!(
+            Sqlite.defer_constraints(false),
+            Some("PRAGMA defer_foreign_keys = ON")
+        );
+        // Postgres defers only within the transaction, so nothing to undo.
+        assert_eq!(Postgres.restore_constraints(), None);
+        assert_eq!(Sqlite.restore_constraints(), None);
     }
 
     // -- guard rails --------------------------------------------------------

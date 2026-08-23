@@ -20,6 +20,7 @@ pub enum Engine {
     /// Postgres, plus storage defaults so a Supabase project needs no
     /// `storage:` block.
     Supabase,
+    Sqlite,
 }
 
 impl Engine {
@@ -28,6 +29,7 @@ impl Engine {
             Engine::Postgres => "postgres",
             Engine::Mysql => "mysql",
             Engine::Supabase => "supabase",
+            Engine::Sqlite => "sqlite",
         }
     }
 
@@ -42,6 +44,18 @@ impl Engine {
     /// Whether this engine implies object storage.
     pub fn has_storage(self) -> bool {
         matches!(self, Engine::Supabase)
+    }
+
+    /// Guess the engine from a connection URL, for `seedle init`.
+    pub fn from_url(url: &str) -> Engine {
+        let scheme = url.split_once("://").map(|(s, _)| s).unwrap_or("");
+        match scheme {
+            "mysql" | "mariadb" => Engine::Mysql,
+            "sqlite" => Engine::Sqlite,
+            // A bare path is a database file.
+            "" => Engine::Sqlite,
+            _ => Engine::Postgres,
+        }
     }
 }
 

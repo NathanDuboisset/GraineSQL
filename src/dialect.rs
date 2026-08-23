@@ -24,6 +24,11 @@ pub trait Dialect: Send + Sync {
     /// Session settings applied on connect to make text output deterministic.
     fn session_setup(&self) -> &'static [&'static str];
 
+    /// Query returning the server version, for `seedle sources`.
+    fn version_query(&self) -> &'static str {
+        "SELECT version()"
+    }
+
     /// Expression that reads `col` as canonical text.
     fn read_expr(&self, col: &Column) -> String;
 
@@ -63,6 +68,32 @@ pub trait Dialect: Send + Sync {
         }
     }
 
+    /// Session statement that suspends foreign-key checking, when the engine
+    /// can, for loading a set of tables whose keys form a cycle.
+    ///
+    /// `all_deferrable` says whether every constraint in the cycle is
+    /// `DEFERRABLE`, which is the only case Postgres can satisfy.
+    fn defer_constraints(&self, all_deferrable: bool) -> Option<&'static str> {
+        let _ = all_deferrable;
+        None
+    }
+
+    /// Undo [`Dialect::defer_constraints`], where it outlives the transaction.
+    fn restore_constraints(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Whether sequence fixup has to wait until after the commit.
+    fn fixup_after_commit(&self) -> bool {
+        false
+    }
+
+    /// Statements that advance identity sequences past the loaded keys.
+    fn sequence_fixups(&self, table: &Table) -> Vec<String> {
+        let _ = table;
+        Vec::new()
+    }
+
     /// Statement that empties a table.
     ///
     /// Deliberately `DELETE FROM` rather than `TRUNCATE` on both engines:
@@ -77,6 +108,7 @@ pub trait Dialect: Send + Sync {
 pub fn for_engine(engine: Engine) -> Box<dyn Dialect> {
     match engine.dialect() {
         Engine::Mysql => Box::new(Mysql),
+        Engine::Sqlite => Box::new(Sqlite),
         _ => Box::new(Postgres),
     }
 }
@@ -174,6 +206,19 @@ impl Dialect for Postgres {
 
     fn insert_verb(&self, _mode: LoadMode) -> &'static str {
         "INSERT INTO"
+    }
+
+    fn defer_constraints(&self, all_deferrable: bool) -> Option<&'static str> {
+        // Postgres errors rather than ignoring a request to defer a constraint
+        // that is not DEFERRABLE.
+        all_deferrable.then_some("SET CONSTRAINTS ALL DEFERRED")
+    }
+
+    fn sequence_fixups(&self, table: &Table) -> Vec<String> {
+        table
+            .identity_columns()
+            .map(|c| crate::db::postgres::fix_sequence_sql(&table.id, &c.name))
+            .collect()
     }
 
     fn conflict_clause(
@@ -345,6 +390,20 @@ impl Dialect for Mysql {
         }
     }
 
+    fn defer_constraints(&self, _all_deferrable: bool) -> Option<&'static str> {
+        // Transaction-scoped, and works regardless of how the keys were declared.
+        Some("SET FOREIGN_KEY_CHECKS = 0")
+    }
+
+    fn restore_constraints(&self) -> Option<&'static str> {
+        Some("SET FOREIGN_KEY_CHECKS = 1")
+    }
+
+    fn fixup_after_commit(&self) -> bool {
+        // ALTER TABLE commits implicitly, which would split the load in two.
+        true
+    }
+
     fn conflict_clause(
         &self,
         table: &Table,
@@ -382,6 +441,166 @@ impl Dialect for Mysql {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// SQLite
+// ---------------------------------------------------------------------------
+
+pub struct Sqlite;
+
+impl Dialect for Sqlite {
+    fn engine(&self) -> Engine {
+        Engine::Sqlite
+    }
+
+    fn quote_ident(&self, name: &str) -> String {
+        format!("\"{}\"", name.replace('"', "\"\""))
+    }
+
+    fn placeholder(&self, n: usize) -> String {
+        format!("?{n}")
+    }
+
+    fn session_setup(&self) -> &'static [&'static str] {
+        // Foreign keys are off by default, so a load would silently accept
+        // orphans without this.
+        &["PRAGMA foreign_keys = ON"]
+    }
+
+    fn version_query(&self) -> &'static str {
+        "SELECT sqlite_version()"
+    }
+
+    fn read_expr(&self, col: &Column) -> String {
+        let q = self.quote_ident(&col.name);
+        match &col.class {
+            // CAST(... AS TEXT) on a blob reinterprets the bytes, and hex(NULL)
+            // returns an empty string rather than NULL, which would turn a null
+            // blob into an empty one.
+            TypeClass::Bytes => format!("CASE WHEN {q} IS NULL THEN NULL ELSE hex({q}) END"),
+            _ => format!("CAST({q} AS TEXT)"),
+        }
+    }
+
+    fn write_expr(&self, col: &Column, n: usize) -> String {
+        match &col.class {
+            TypeClass::Bytes => format!("unhex(?{n})"),
+            _ => format!("?{n}"),
+        }
+    }
+
+    fn bind_text(&self, col: &Column, v: &Value) -> Result<Option<String>> {
+        Ok(match v {
+            Value::Null => None,
+            // No boolean type: 0 and 1, as every SQLite client expects.
+            Value::Bool(b) => Some(if *b { "1" } else { "0" }.to_string()),
+            Value::Bytes(b) => Some(hex_upper(b)),
+            Value::Float(f) if !f.is_finite() => bail!(
+                "column {} holds {} but SQLite cannot store non-finite floats",
+                col.name,
+                crate::value::format_float(*f)
+            ),
+            _ => v.to_text(),
+        })
+    }
+
+    fn literal(&self, col: &Column, v: &Value) -> Result<String> {
+        Ok(match v {
+            Value::Null => "NULL".to_string(),
+            Value::Bool(b) => if *b { "1" } else { "0" }.to_string(),
+            Value::Int(i) => i.to_string(),
+            Value::Decimal(d) if is_bare_numeric_literal(d) => d.clone(),
+            Value::Float(f) if f.is_finite() => crate::value::format_float(*f),
+            Value::Float(f) => bail!(
+                "column {} holds {} but SQLite cannot store non-finite floats",
+                col.name,
+                crate::value::format_float(*f)
+            ),
+            Value::Bytes(b) if b.is_empty() => "x''".to_string(),
+            Value::Bytes(b) => format!("x'{}'", hex_upper(b)),
+            other => {
+                let text = other.to_text().expect("null was handled above");
+                sqlite_quote(&text)
+            }
+        })
+    }
+
+    fn insert_verb(&self, mode: LoadMode) -> &'static str {
+        match mode {
+            LoadMode::SkipExisting => "INSERT OR IGNORE INTO",
+            _ => "INSERT INTO",
+        }
+    }
+
+    fn defer_constraints(&self, _all_deferrable: bool) -> Option<&'static str> {
+        Some("PRAGMA defer_foreign_keys = ON")
+    }
+
+    fn sequence_fixups(&self, table: &Table) -> Vec<String> {
+        table
+            .identity_columns()
+            .map(|c| crate::db::sqlite::fix_sequence_sql(&table.id, &c.name))
+            .collect()
+    }
+
+    fn conflict_clause(
+        &self,
+        table: &Table,
+        key: &[String],
+        insert_cols: &[String],
+        mode: LoadMode,
+    ) -> Result<String> {
+        match mode {
+            LoadMode::Insert | LoadMode::TruncateFirst | LoadMode::SkipExisting => {
+                Ok(String::new())
+            }
+            LoadMode::Upsert => {
+                if key.is_empty() {
+                    bail!(
+                        "table {} has no primary key or unique constraint, so `upsert` has \
+                         nothing to conflict on; set `load: insert` or `key: [...]` for it",
+                        table.id
+                    );
+                }
+                let target = key
+                    .iter()
+                    .map(|c| self.quote_ident(c))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let updates: Vec<String> = insert_cols
+                    .iter()
+                    .filter(|c| !key.contains(c))
+                    .map(|c| {
+                        let q = self.quote_ident(c);
+                        format!("{q} = excluded.{q}")
+                    })
+                    .collect();
+                if updates.is_empty() {
+                    return Ok(format!(" ON CONFLICT ({target}) DO NOTHING"));
+                }
+                Ok(format!(
+                    " ON CONFLICT ({target}) DO UPDATE SET {}",
+                    updates.join(", ")
+                ))
+            }
+        }
+    }
+
+    fn order_expr(&self, col: &Column) -> String {
+        let q = self.quote_ident(&col.name);
+        match &col.class {
+            // BINARY is the default, but a column declared COLLATE NOCASE would
+            // otherwise order case-insensitively and leave ties.
+            TypeClass::Text { .. } => format!("{q} COLLATE BINARY"),
+            _ => q,
+        }
+    }
+}
+
+/// Single-quoted SQLite string literal. Only the quote is special.
+fn sqlite_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
 }
 
 /// Single-quoted MySQL string literal.
