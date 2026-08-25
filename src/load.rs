@@ -5,12 +5,14 @@
 //! used instead of `TRUNCATE` (see [`crate::dialect::Dialect::delete_all`]) and
 //! why sequence fixup on MySQL has to be deferred until after the commit.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use anyhow::{Context, Result, bail};
 
 use crate::config::{LoadMode, ResolvedTable};
 use crate::db::PinnedConn;
 use crate::dialect::Dialect;
-use crate::schema::{Column, Table, TableId};
+use crate::schema::{Column, Schema, Table, TableId};
 use crate::value::Value;
 
 /// What a load did, or would do, to one table.
@@ -225,6 +227,31 @@ pub async fn load_table(
     cfg: &ResolvedTable,
 ) -> Result<TableResult> {
     let key = upsert_key(table, cfg)?;
+
+    // A bulk load has nowhere to put a conflict clause, so it only applies to
+    // the modes that have none.
+    let bulk = matches!(cfg.load_mode, LoadMode::Insert | LoadMode::TruncateFirst)
+        .then(|| dialect.copy_in_statement(table, columns))
+        .flatten();
+    if let Some(sql) = bulk {
+        let mut payload = crate::io::LineBuffer::new();
+        for row in rows {
+            let fields: Vec<String> = row.iter().map(crate::format::csv::encode_field).collect();
+            payload.push_line(&crate::format::csv::encode_record(&fields));
+        }
+        let affected = conn
+            .copy_in(&sql, &payload.finish())
+            .await
+            .with_context(|| format!("bulk loading {}", cfg.id))?;
+        return Ok(TableResult {
+            table: table.id.clone(),
+            mode: cfg.load_mode,
+            rows: rows.len() as u64,
+            affected,
+            deleted: 0,
+        });
+    }
+
     let sql = insert_statement(dialect, table, columns, &key, cfg.load_mode)?;
     let mut affected = 0;
     for (i, row) in rows.iter().enumerate() {
@@ -324,6 +351,113 @@ pub fn confirmation_reasons(
 }
 
 /// Render a plan as the `seedle plan` output.
+/// Draw the plan as a dependency tree, roots first.
+///
+/// The flat plan says what order tables load in; this says why. A table appears
+/// under each parent it needs, and a table already shown deeper up the tree is
+/// marked rather than expanded again, so a diamond does not print twice.
+pub fn render_tree(source_name: &str, plans: &[TablePlan], schema: &Schema) -> String {
+    if plans.is_empty() {
+        return "nothing to load\n".to_string();
+    }
+
+    let included: BTreeSet<&TableId> = plans.iter().map(|p| &p.table).collect();
+    let rows: BTreeMap<&TableId, u64> = plans.iter().map(|p| (&p.table, p.rows)).collect();
+
+    // children[parent] = tables that reference it, within the plan.
+    let mut children: BTreeMap<&TableId, BTreeSet<&TableId>> = BTreeMap::new();
+    let mut has_parent: BTreeSet<&TableId> = BTreeSet::new();
+    for p in plans {
+        let Some(table) = schema.get(&p.table) else {
+            continue;
+        };
+        for fk in &table.foreign_keys {
+            let Some(parent) = schema.resolve(&fk.references) else {
+                continue;
+            };
+            if parent == p.table {
+                continue;
+            }
+            if let Some(parent) = included.iter().find(|id| ***id == parent) {
+                children.entry(parent).or_default().insert(&p.table);
+                has_parent.insert(&p.table);
+            }
+        }
+    }
+
+    let mut out = format!("load order for source {source_name:?}:\n");
+    let mut drawn: BTreeSet<&TableId> = BTreeSet::new();
+    let roots: Vec<&TableId> = plans
+        .iter()
+        .map(|p| &p.table)
+        .filter(|id| !has_parent.contains(id))
+        .collect();
+
+    for root in roots {
+        draw(&mut out, root, &children, &rows, &mut drawn, "", true);
+    }
+    // Anything left is inside a cycle, which has no root to start from.
+    for p in plans {
+        if !drawn.contains(&p.table) {
+            draw(&mut out, &p.table, &children, &rows, &mut drawn, "", true);
+        }
+    }
+
+    let total: u64 = plans.iter().map(|p| p.rows).sum();
+    out.push_str(&format!(
+        "\n{} table{}, {total} row{} total\n",
+        plans.len(),
+        if plans.len() == 1 { "" } else { "s" },
+        if total == 1 { "" } else { "s" }
+    ));
+    out
+}
+
+fn draw<'a>(
+    out: &mut String,
+    id: &'a TableId,
+    children: &BTreeMap<&'a TableId, BTreeSet<&'a TableId>>,
+    rows: &BTreeMap<&'a TableId, u64>,
+    drawn: &mut BTreeSet<&'a TableId>,
+    prefix: &str,
+    last: bool,
+) {
+    let branch = if prefix.is_empty() {
+        String::new()
+    } else if last {
+        format!("{prefix}`- ")
+    } else {
+        format!("{prefix}|- ")
+    };
+    let count = rows.get(id).copied().unwrap_or(0);
+
+    if !drawn.insert(id) {
+        out.push_str(&format!("{branch}{id} (above)\n"));
+        return;
+    }
+    out.push_str(&format!("{branch}{id}  {count} rows\n"));
+
+    let kids: Vec<&TableId> = children.get(id).into_iter().flatten().copied().collect();
+    let child_prefix = if prefix.is_empty() {
+        "  ".to_string()
+    } else if last {
+        format!("{prefix}   ")
+    } else {
+        format!("{prefix}|  ")
+    };
+    for (i, child) in kids.iter().enumerate() {
+        draw(
+            out,
+            child,
+            children,
+            rows,
+            drawn,
+            &child_prefix,
+            i + 1 == kids.len(),
+        );
+    }
+}
+
 pub fn render_plan(source_name: &str, plans: &[TablePlan]) -> String {
     if plans.is_empty() {
         return "nothing to load\n".to_string();

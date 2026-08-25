@@ -177,6 +177,81 @@ fn sqlite_preserves_awkward_values() {
 }
 
 #[test]
+fn add_pulls_in_the_parents_a_table_needs() {
+    // Adding `users` alone would produce a config that cannot load.
+    let s = Sqlite::new("");
+    std::fs::write(
+        s.dir.path().join("seedle.yaml"),
+        "version: 1\n\
+         sources:\n  dev: {engine: sqlite, url: \"sqlite://src.db\", default: true}\n\
+         tables: {}\n",
+    )
+    .unwrap();
+
+    let out = s.ok(&["add", "users"]);
+    assert!(out.contains("orgs"), "orgs should come along:\n{out}");
+    assert!(out.contains("parent"), "{out}");
+
+    // `tables: {}` is a flow mapping, so the result has to still parse.
+    s.ok(&["lock", "-q"]);
+    s.ok(&["export", "-q"]);
+    assert!(s.dir.path().join("seed/orgs.jsonl").exists());
+    assert!(s.dir.path().join("seed/users.jsonl").exists());
+}
+
+#[test]
+fn add_can_skip_the_parents() {
+    let s = Sqlite::new("");
+    std::fs::write(
+        s.dir.path().join("seedle.yaml"),
+        "version: 1\n\
+         sources:\n  dev: {engine: sqlite, url: \"sqlite://src.db\", default: true}\n\
+         tables: {}\n",
+    )
+    .unwrap();
+
+    s.ok(&["add", "users", "--no-parents"]);
+    let cfg = std::fs::read_to_string(s.dir.path().join("seedle.yaml")).unwrap();
+    assert!(cfg.contains("users:"), "{cfg}");
+    assert!(!cfg.contains("orgs:"), "{cfg}");
+}
+
+#[test]
+fn status_reports_whether_the_seed_is_current() {
+    let s = Sqlite::new("  orgs: {}\n  users: {}\n  employees: {}\n");
+    s.ok(&["lock", "-q"]);
+    s.ok(&["export", "-q"]);
+
+    let out = s.ok(&["status"]);
+    assert!(out.contains("schema: matches"), "{out}");
+    assert!(out.contains("in sync"), "{out}");
+
+    // A row added behind seedle's back shows as a count mismatch.
+    s.sql("src.db", "INSERT INTO orgs (name) VALUES ('Later')");
+    let out = s.ok(&["status"]);
+    assert!(out.contains("seeded 2, live 3"), "{out}");
+}
+
+#[test]
+fn plan_tree_shows_why_the_order_is_what_it_is() {
+    let s = Sqlite::new("  orgs: {}\n  users: {}\n  employees: {}\n");
+    s.ok(&["lock", "-q"]);
+    s.ok(&["export", "-q"]);
+
+    let out = s.ok(&["plan", "--tree"]);
+    let orgs = out.find("main.orgs").expect("orgs in tree");
+    let users = out.find("main.users").expect("users in tree");
+    assert!(
+        orgs < users,
+        "a parent must be drawn above its child:\n{out}"
+    );
+    assert!(out.contains("`- main.users"), "{out}");
+    // A self-reference is not a dependency between tables, so employees is a
+    // root rather than nested under itself.
+    assert!(out.contains("main.employees"), "{out}");
+}
+
+#[test]
 fn sqlite_foreign_keys_are_enforced_during_a_load() {
     // They are off by default, so a load would otherwise accept orphans.
     let s = Sqlite::new("  users: {}\n");

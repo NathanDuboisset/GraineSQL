@@ -70,6 +70,35 @@ impl LineBuffer {
     }
 }
 
+/// Compress with a fixed configuration, so the same input always produces the
+/// same bytes.
+///
+/// gzip records a modification time and an OS byte in its header; both are left
+/// zeroed, or two runs over identical data would differ.
+pub fn gzip(bytes: &[u8]) -> Result<Vec<u8>> {
+    use flate2::{Compression, GzBuilder};
+    let mut out = Vec::new();
+    {
+        let mut w = GzBuilder::new()
+            .mtime(0)
+            .operating_system(255)
+            .write(&mut out, Compression::new(6));
+        w.write_all(bytes).context("compressing")?;
+        w.finish().context("finishing the gzip stream")?;
+    }
+    Ok(out)
+}
+
+pub fn gunzip(bytes: &[u8]) -> Result<Vec<u8>> {
+    use flate2::read::GzDecoder;
+    use std::io::Read;
+    let mut out = Vec::new();
+    GzDecoder::new(bytes)
+        .read_to_end(&mut out)
+        .context("decompressing")?;
+    Ok(out)
+}
+
 /// Remove files in `dir` matching `keep`'s directory that are no longer produced.
 ///
 /// Returns the paths removed. Used so a table dropped from the config, or rows
@@ -92,10 +121,11 @@ pub fn prune_stale(dir: &Path, keep: &[std::path::PathBuf]) -> Result<Vec<std::p
             continue;
         }
         // Never touch anything we did not write.
-        let is_ours = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| matches!(e, "jsonl" | "csv" | "sql" | "json"));
+        let is_ours = path.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+            ["jsonl.gz", "jsonl", "csv", "sql", "json"]
+                .iter()
+                .any(|ext| n.ends_with(&format!(".{ext}")))
+        });
         if !is_ours {
             continue;
         }
@@ -108,6 +138,27 @@ pub fn prune_stale(dir: &Path, keep: &[std::path::PathBuf]) -> Result<Vec<std::p
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gzip_is_deterministic_and_round_trips() {
+        let data = b"{\"id\":1}\n{\"id\":2}\n";
+        let a = gzip(data).unwrap();
+        // The header carries an mtime, so two runs would otherwise differ.
+        assert_eq!(a, gzip(data).unwrap(), "compression must be reproducible");
+        assert_eq!(gunzip(&a).unwrap(), data);
+        assert!(!a.is_empty());
+    }
+
+    #[test]
+    fn pruning_recognises_a_compressed_seed_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_atomic(&dir.path().join("users.jsonl.gz"), b"x").unwrap();
+        write_atomic(&dir.path().join("notes.md"), b"x").unwrap();
+        let removed = prune_stale(dir.path(), &[]).unwrap();
+        assert_eq!(removed.len(), 1);
+        assert!(removed[0].ends_with("users.jsonl.gz"));
+        assert!(dir.path().join("notes.md").exists());
+    }
 
     #[test]
     fn line_buffer_guarantees_a_trailing_newline() {

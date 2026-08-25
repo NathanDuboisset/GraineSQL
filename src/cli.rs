@@ -57,11 +57,31 @@ pub enum Command {
         force: bool,
     },
 
+    /// Add tables to the config, along with the parents they depend on.
+    Add {
+        /// Tables to add.
+        #[arg(required = true)]
+        tables: Vec<String>,
+
+        /// Add only what was named, without the foreign-key parents it needs.
+        #[arg(long)]
+        no_parents: bool,
+    },
+
+    /// Summarise whether the seed files are current against a database.
+    Status,
+
     /// List configured sources and check that each one connects.
     Sources {
         /// Skip the connection check and only show how credentials resolve.
         #[arg(long)]
         no_connect: bool,
+    },
+
+    /// Print a shell completion script.
+    Completions {
+        /// Shell to generate for.
+        shell: clap_complete::Shell,
     },
 
     /// Introspect the source and write seedle.lock.
@@ -111,6 +131,11 @@ pub enum Command {
     Plan {
         #[arg(long, value_delimiter = ',')]
         tables: Option<Vec<String>>,
+
+        /// Draw the foreign-key dependencies as a tree, so the load order
+        /// explains itself.
+        #[arg(long)]
+        tree: bool,
     },
 
     /// Load seed files into the target database and its storage buckets.

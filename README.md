@@ -33,7 +33,8 @@ cargo install seedle                         # from source
 Or download a binary from [Releases](https://github.com/NathanDuboisset/seedle/releases);
 each archive ships a `.sha256`.
 
-Needs Rust 1.85+ to build. Postgres 12+, Supabase, or MySQL 8+ at runtime.
+Needs Rust 1.85+ to build. Postgres 12+, Supabase, MySQL 8+ or SQLite at
+runtime.
 
 ## Getting started
 
@@ -72,7 +73,7 @@ sources:
 
 export:
   out: seed                      # holds seedle.lock and the data files
-  format: jsonl                  # jsonl | csv | sql
+  format: jsonl                  # jsonl | jsonl.gz | csv | sql
   json: unroll                   # nest json columns instead of escaping them
   sql_batch: 100                 # rows per INSERT when format: sql
   concurrency: 4                 # tables exported at once; cannot affect output
@@ -125,7 +126,8 @@ the source outright; use it on anything you export from.
 |---|---|
 | `postgres` | Verified end to end |
 | `supabase` | Postgres, plus storage discovery so buckets need no config |
-| `mysql` | Implemented and unit-tested, not yet run against a live server |
+| `mysql` | Verified end to end |
+| `sqlite` | Verified end to end. `url: sqlite://app.db`, or a bare path |
 
 `engine: supabase` looks for the storage URL in `SUPABASE_URL`,
 `NEXT_PUBLIC_SUPABASE_URL`, `VITE_SUPABASE_URL` or `PUBLIC_SUPABASE_URL`, and
@@ -137,18 +139,41 @@ the key in `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_SECRET_KEY` or
 | Command | What it does |
 |---|---|
 | `seedle init` | Write a starter config, optionally pre-filled from a live database |
+| `seedle add TABLE...` | Append tables to the config, with the parents they need |
 | `seedle sources` | List sources, resolve credentials, check connectivity |
 | `seedle lock` | Introspect and write `seedle.lock` |
 | `seedle lock --check` | Exit non-zero if the live schema differs. The CI gate |
-| `seedle diff` | Show the drift, classified breaking/benign |
-| `seedle export` | Pull rows into seed files |
+| `seedle diff` | Show the drift, classified by severity |
+| `seedle status` | Whether the seed files are current: drift plus row counts |
+| `seedle export` | Pull rows and buckets into seed files |
 | `seedle plan` | Load order, row counts, per-table action. Writes nothing |
+| `seedle plan --tree` | The same, drawn as a dependency tree |
 | `seedle load` | Push seed files into a database |
 | `seedle verify` | Re-hash the seed files and bucket objects against the lock. Needs no network |
+| `seedle completions SHELL` | Print a completion script |
 
 Global flags: `--config`, `--source`, `--json`, `-v`, `-q`, `-y`.
 `--tables a,b` narrows `export`, `plan` and `load`; `--buckets a,b` and
 `--no-buckets` do the same for storage.
+
+```
+$ seedle plan --tree
+load order for source "dev":
+public.countries  3 rows
+public.orgs  3 rows
+  `- public.users  4 rows
+     `- public.orders  2 rows
+
+4 tables, 12 rows total
+```
+
+Completions install the usual way:
+
+```sh
+seedle completions bash > /etc/bash_completion.d/seedle
+seedle completions zsh  > "${fpath[1]}/_seedle"
+seedle completions fish > ~/.config/fish/completions/seedle.fish
+```
 
 ### Referential completeness
 

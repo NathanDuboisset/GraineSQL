@@ -927,10 +927,15 @@ async fn build_plans(
     Ok((loads, plans))
 }
 
-pub async fn cmd_plan(ctx: &Ctx, tables: Option<Vec<String>>) -> Result<()> {
+pub async fn cmd_plan(ctx: &Ctx, tables: Option<Vec<String>>, tree: bool) -> Result<()> {
     let (_src, db) = ctx.connect(1).await?;
     let live = introspect(&db, &ctx.cfg).await?;
     let (_loads, plans) = build_plans(ctx, &db, &live, &IndexMap::new(), tables, false).await?;
+
+    if !ctx.json && tree {
+        print!("{}", load::render_tree(&db.source_name, &plans, &live));
+        return Ok(());
+    }
 
     if ctx.json {
         let items: Vec<serde_json::Value> = plans
@@ -1446,16 +1451,230 @@ pub async fn cmd_init(cli: &Cli, url: Option<String>, force: bool) -> Result<()>
 }
 
 // ---------------------------------------------------------------------------
+// add
+// ---------------------------------------------------------------------------
+
+/// Append tables to the config, with the parents they need to load.
+pub async fn cmd_add(ctx: &Ctx, wanted: Vec<String>, no_parents: bool) -> Result<()> {
+    let (_src, db) = ctx.connect(1).await?;
+    let full = db::introspect(&db).await?;
+
+    let mut resolved = Vec::new();
+    for name in &wanted {
+        let id: TableId = name.parse().map_err(|e| anyhow::anyhow!("{name:?}: {e}"))?;
+        match full.resolve(&id) {
+            Some(r) => resolved.push(r),
+            None => bail!(
+                "{}",
+                db::Missing {
+                    wanted: vec![id],
+                    found: full.tables.keys().cloned().collect(),
+                }
+                .describe()
+            ),
+        }
+    }
+
+    // Walk the foreign keys so the added slice can actually load.
+    let mut needed: Vec<TableId> = Vec::new();
+    let mut queue = resolved.clone();
+    while let Some(id) = queue.pop() {
+        if needed.contains(&id) {
+            continue;
+        }
+        needed.push(id.clone());
+        if no_parents {
+            continue;
+        }
+        if let Some(table) = full.get(&id) {
+            for fk in &table.foreign_keys {
+                if let Some(parent) = full.resolve(&fk.references) {
+                    queue.push(parent);
+                }
+            }
+        }
+    }
+    needed.sort();
+
+    let existing: Vec<TableId> = ctx
+        .cfg
+        .resolved_tables()?
+        .into_iter()
+        .map(|t| t.id)
+        .collect();
+    let new: Vec<String> = needed
+        .iter()
+        .filter(|id| {
+            !existing
+                .iter()
+                .any(|e| full.resolve(e).as_ref() == Some(id))
+        })
+        .map(|id| id.file_stem(&full.default_schema))
+        .collect();
+
+    if new.is_empty() {
+        ctx.say("already in the config; nothing to add");
+        return Ok(());
+    }
+
+    let path = ctx.cfg.base_dir.join(crate::config::CONFIG_FILENAME);
+    let mut text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    // An empty `tables: {}` is a flow mapping, so indented entries cannot
+    // follow it; turn it into a block mapping first.
+    for empty in ["tables: {}\n", "tables: {}\r\n"] {
+        if let Some(at) = text.find(empty) {
+            text.replace_range(at..at + empty.len(), "tables:\n");
+            break;
+        }
+    }
+    if !text.contains("\ntables:") && !text.starts_with("tables:") {
+        text.push_str("\ntables:\n");
+    }
+    for name in &new {
+        text.push_str(&format!("  {name}: {{}}\n"));
+    }
+    crate::io::write_atomic(&path, text.as_bytes())?;
+
+    let pulled: Vec<&String> = new.iter().filter(|n| !wanted.contains(n)).collect();
+    ctx.say(format!("added {} to {}", new.join(", "), path.display()));
+    if !pulled.is_empty() {
+        ctx.say(format!(
+            "{} came along as foreign-key parent{}",
+            pulled
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            if pulled.len() == 1 { "" } else { "s" }
+        ));
+    }
+    ctx.say("run `seedle lock` to record the schema");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// status
+// ---------------------------------------------------------------------------
+
+/// One answer to "is my seed data current against this database".
+pub async fn cmd_status(ctx: &Ctx) -> Result<()> {
+    let lock_path = ctx.cfg.lock_path();
+    let lock = Lock::read(&lock_path).ok();
+    let (_src, db) = ctx.connect(1).await?;
+    let live = introspect(&db, &ctx.cfg).await?;
+
+    let report = match &lock {
+        Some(l) => drift::classify(&l.to_schema_for(&live), &live),
+        None => drift::Report::default(),
+    };
+    let (breaking, confirm, benign) = report.counts();
+
+    // Row counts on both sides, so "current" means the data too, not just the
+    // schema.
+    let mut tables = Vec::new();
+    for cfg in ctx.cfg.resolved_tables()? {
+        let Some(id) = live.resolve(&cfg.id) else {
+            continue;
+        };
+        let recorded = lock
+            .as_ref()
+            .and_then(|l| {
+                l.files
+                    .get(&crate::lock::relative(&id, &live.default_schema))
+            })
+            .map(|f| f.rows);
+        let live_rows = db
+            .query_text(&format!(
+                "SELECT count(*) FROM {}",
+                db.dialect().quote_table(&id)
+            ))
+            .await
+            .ok()
+            .and_then(|r| r.first().and_then(|r| r.first().cloned().flatten()))
+            .and_then(|v| v.parse::<u64>().ok());
+        tables.push((id, recorded, live_rows));
+    }
+
+    if ctx.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "locked": lock.is_some(),
+                "fingerprint": lock.as_ref().map(|l| l.fingerprint.clone()),
+                "drift": {"breaking": breaking, "needs_confirmation": confirm, "benign": benign},
+                "tables": tables.iter().map(|(id, seeded, live_rows)| serde_json::json!({
+                    "table": id.to_string(),
+                    "seeded_rows": seeded,
+                    "live_rows": live_rows,
+                })).collect::<Vec<_>>(),
+            }))?
+        );
+        return Ok(());
+    }
+
+    match &lock {
+        None => ctx.say(format!(
+            "no lock at {}; run `seedle lock`",
+            lock_path.display()
+        )),
+        Some(l) => ctx.say(format!("lock {} ({})", l.fingerprint, lock_path.display())),
+    }
+    ctx.say(if report.is_empty() {
+        "schema: matches".to_string()
+    } else {
+        format!("schema: {breaking} breaking, {confirm} needing confirmation, {benign} benign")
+    });
+
+    let width = tables
+        .iter()
+        .map(|(id, ..)| id.to_string().chars().count())
+        .max()
+        .unwrap_or(0);
+    for (id, seeded, live_rows) in &tables {
+        let note = match (seeded, live_rows) {
+            (Some(s), Some(l)) if s == l => "in sync".to_string(),
+            (Some(s), Some(l)) => format!("seeded {s}, live {l}"),
+            (None, Some(l)) => format!("not exported, live {l}"),
+            (Some(s), None) => format!("seeded {s}, live unknown"),
+            (None, None) => "not exported".to_string(),
+        };
+        ctx.say(format!(
+            "  {:width$}  {note}",
+            id.to_string(),
+            width = width
+        ));
+    }
+    Ok(())
+}
+
+/// Print a completion script for `shell`.
+pub fn cmd_completions(shell: clap_complete::Shell) {
+    use clap::CommandFactory;
+    clap_complete::generate(shell, &mut Cli::command(), "seedle", &mut std::io::stdout());
+}
+
+// ---------------------------------------------------------------------------
 
 pub async fn dispatch(cli: Cli) -> Result<()> {
-    // `init` runs before a config exists, so it does not build a Ctx.
-    if let Command::Init { url, force } = &cli.command {
-        return cmd_init(&cli, url.clone(), *force).await;
+    // These run before a config exists, so they do not build a Ctx.
+    match &cli.command {
+        Command::Init { url, force } => return cmd_init(&cli, url.clone(), *force).await,
+        Command::Completions { shell } => {
+            cmd_completions(*shell);
+            return Ok(());
+        }
+        _ => {}
     }
 
     let ctx = Ctx::new(&cli)?;
     match cli.command {
-        Command::Init { .. } => unreachable!("handled above"),
+        Command::Init { .. } | Command::Completions { .. } => unreachable!("handled above"),
+        Command::Add { tables, no_parents } => cmd_add(&ctx, tables, no_parents).await,
+        Command::Status => cmd_status(&ctx).await,
         Command::Sources { no_connect } => cmd_sources(&ctx, no_connect).await,
         Command::Lock { check } => cmd_lock(&ctx, check).await,
         Command::Diff => cmd_diff(&ctx).await,
@@ -1480,7 +1699,7 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             )
             .await
         }
-        Command::Plan { tables } => cmd_plan(&ctx, tables).await,
+        Command::Plan { tables, tree } => cmd_plan(&ctx, tables, tree).await,
         Command::Load {
             tables,
             buckets,

@@ -81,6 +81,10 @@ pub mod supabase {
 #[value(rename_all = "lowercase")]
 pub enum Format {
     Jsonl,
+    /// jsonl through gzip, for tables too large to review by eye.
+    #[serde(rename = "jsonl.gz")]
+    #[value(name = "jsonl.gz")]
+    JsonlGz,
     Csv,
     Sql,
     /// Only valid with `layout: per_row`, a whole file is one JSON object.
@@ -88,9 +92,15 @@ pub enum Format {
 }
 
 impl Format {
+    /// Whether the bytes on disk are compressed.
+    pub fn compressed(self) -> bool {
+        matches!(self, Format::JsonlGz)
+    }
+
     pub fn extension(self) -> &'static str {
         match self {
             Format::Jsonl => "jsonl",
+            Format::JsonlGz => "jsonl.gz",
             Format::Csv => "csv",
             Format::Sql => "sql",
             Format::Json => "json",
@@ -479,7 +489,7 @@ impl Config {
                     "table {key:?} uses `format: json` with the default single-file \
                      layout; json is only valid with `layout: per_row` (did you mean jsonl?)"
                 ),
-                (Layout::PerRow, Format::Csv | Format::Sql) => bail!(
+                (Layout::PerRow, Format::Csv | Format::Sql | Format::JsonlGz) => bail!(
                     "table {key:?} uses `layout: per_row` with `format: {}`; \
                      per-row output must be json",
                     format.extension()

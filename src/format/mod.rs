@@ -40,10 +40,11 @@ pub fn writer<'a>(
 ) -> Result<Box<dyn RowWriter + 'a>> {
     let stem = cfg.id.file_stem(default_schema);
     Ok(match (cfg.layout, cfg.format) {
-        (Layout::Single, Format::Jsonl) => Box::new(json::JsonlWriter::new(
-            format!("{stem}.jsonl"),
+        (Layout::Single, Format::Jsonl | Format::JsonlGz) => Box::new(json::JsonlWriter::new(
+            format!("{stem}.{}", cfg.format.extension()),
             columns,
             cfg.json,
+            cfg.format.compressed(),
         )),
         (Layout::Single, Format::Csv) => {
             Box::new(csv::CsvWriter::new(format!("{stem}.csv"), columns))
@@ -77,9 +78,11 @@ pub fn read(
 ) -> Result<Vec<Vec<Value>>> {
     let stem = cfg.id.file_stem(default_schema);
     match (cfg.layout, cfg.format) {
-        (Layout::Single, Format::Jsonl) => {
-            json::read_jsonl(&dir.join(format!("{stem}.jsonl")), columns)
-        }
+        (Layout::Single, Format::Jsonl | Format::JsonlGz) => json::read_jsonl(
+            &dir.join(format!("{stem}.{}", cfg.format.extension())),
+            columns,
+            cfg.format.compressed(),
+        ),
         (Layout::Single, Format::Csv) => csv::read_csv(&dir.join(format!("{stem}.csv")), columns),
         (Layout::PerRow, Format::Json) => json::read_per_row(&dir.join(&stem), columns),
         (Layout::Single, Format::Sql) => {

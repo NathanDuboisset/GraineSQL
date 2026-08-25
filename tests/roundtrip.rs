@@ -72,8 +72,8 @@ fn export_then_load_then_export_is_byte_identical() {
 #[test]
 fn round_trip_holds_for_every_format() {
     let base = require_pg!();
-    for format in ["jsonl", "csv"] {
-        let f = Fixture::new(&format!("rt_{format}"), &base, SCHEMA);
+    for (i, format) in ["jsonl", "jsonl.gz", "csv", "sql"].iter().enumerate() {
+        let f = Fixture::new(&format!("rt_fmt{i}"), &base, SCHEMA);
         f.sql_src(DATA).unwrap();
         f.write_config_with(&format!("export:\n  format: {format}\n"), TABLES);
         f.ok(&["lock", "-q"]);
@@ -87,6 +87,80 @@ fn round_trip_holds_for_every_format() {
             panic!("{format} does not round-trip:\n{d}");
         }
     }
+}
+
+#[test]
+fn compressed_output_is_smaller_and_still_reproducible() {
+    let base = require_pg!();
+    let f = Fixture::new("gz", &base, SCHEMA);
+    f.sql_src(DATA).unwrap();
+
+    f.write_config_with("export:\n  format: jsonl\n", TABLES);
+    f.ok(&["lock", "-q"]);
+    f.ok(&["export", "-o", "plain", "-q"]);
+
+    f.write_config_with("export:\n  format: jsonl.gz\n", TABLES);
+    f.ok(&["export", "-o", "gz-a", "-q"]);
+    f.ok(&["export", "-o", "gz-b", "-q"]);
+
+    // gzip stores an mtime in its header, so this only holds because the
+    // writer zeroes it.
+    if let Some(d) = dirs_differ(&f.path().join("gz-a"), &f.path().join("gz-b")) {
+        panic!("compressed output is not reproducible:\n{d}");
+    }
+
+    let size = |dir: &str, name: &str| {
+        std::fs::metadata(f.path().join(dir).join(name))
+            .unwrap_or_else(|e| panic!("{dir}/{name}: {e}"))
+            .len()
+    };
+    assert!(
+        size("gz-a", "torture.jsonl.gz") < size("plain", "torture.jsonl"),
+        "compression should shrink the file"
+    );
+}
+
+#[test]
+fn bulk_and_per_row_loading_agree() {
+    // insert and truncate_first go through COPY on Postgres while upsert stays
+    // per-row; both paths must produce the same rows.
+    let base = require_pg!();
+    let f = Fixture::new("bulk", &base, SCHEMA);
+    f.sql_src(DATA).unwrap();
+
+    let bulk = TABLES.replace(": {}", ":\n    load: truncate_first");
+    f.write_config(&bulk);
+    f.ok(&["lock", "-q"]);
+    f.ok(&["export", "-o", "out-src", "-q"]);
+    f.ok(&["export", "-q"]);
+    f.ok(&["load", "--source", "dst", "--yes", "-q"]);
+    f.ok(&["export", "--source", "dst", "-o", "out-bulk", "-q"]);
+
+    if let Some(d) = dirs_differ(&f.path().join("out-src"), &f.path().join("out-bulk")) {
+        panic!("a bulk load changed the data:\n{d}");
+    }
+
+    // The awkward values are the ones a CSV-framed COPY stream could mangle.
+    assert_eq!(
+        f.query_dst("SELECT t_num::text FROM torture WHERE id = 1"),
+        "12345678901234567890.1234567890"
+    );
+    assert_eq!(
+        f.query_dst("SELECT encode(t_bytes, 'hex') FROM torture WHERE id = 1"),
+        "deadbeef00ff"
+    );
+    assert_eq!(
+        f.query_dst("SELECT length(t_vc) FROM torture WHERE id = 1"),
+        "0"
+    );
+    assert_eq!(
+        f.query_dst("SELECT (t_text IS NULL)::text FROM torture WHERE id = 2"),
+        "true"
+    );
+    assert_eq!(
+        f.query_dst("SELECT display FROM users WHERE email = 'hi@globex.test'"),
+        "Multi\nline \"quoted\" 🌱"
+    );
 }
 
 #[test]

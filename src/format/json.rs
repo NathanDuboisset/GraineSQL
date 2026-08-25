@@ -322,15 +322,17 @@ pub struct JsonlWriter<'a> {
     path: String,
     columns: Vec<&'a Column>,
     mode: JsonMode,
+    compress: bool,
     buf: LineBuffer,
 }
 
 impl<'a> JsonlWriter<'a> {
-    pub fn new(path: String, columns: Vec<&'a Column>, mode: JsonMode) -> Self {
+    pub fn new(path: String, columns: Vec<&'a Column>, mode: JsonMode, compress: bool) -> Self {
         Self {
             path,
             columns,
             mode,
+            compress,
             buf: LineBuffer::new(),
         }
     }
@@ -346,9 +348,15 @@ impl RowWriter for JsonlWriter<'_> {
     }
 
     fn finish(self: Box<Self>) -> Result<Vec<Output>> {
+        let bytes = self.buf.finish();
+        let bytes = if self.compress {
+            crate::io::gzip(&bytes)?
+        } else {
+            bytes
+        };
         Ok(vec![Output {
             path: self.path,
-            bytes: self.buf.finish(),
+            bytes,
         }])
     }
 }
@@ -451,9 +459,16 @@ impl RowWriter for PerRowWriter<'_> {
 // Readers
 // ---------------------------------------------------------------------------
 
-pub fn read_jsonl(path: &Path, columns: &[&Column]) -> Result<Vec<Value2D>> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("reading seed file {}", path.display()))?;
+pub fn read_jsonl(path: &Path, columns: &[&Column], compressed: bool) -> Result<Vec<Value2D>> {
+    let raw =
+        std::fs::read(path).with_context(|| format!("reading seed file {}", path.display()))?;
+    let raw = if compressed {
+        crate::io::gunzip(&raw).with_context(|| format!("decompressing {}", path.display()))?
+    } else {
+        raw
+    };
+    let text =
+        String::from_utf8(raw).with_context(|| format!("{} is not valid UTF-8", path.display()))?;
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -993,7 +1008,12 @@ mod tests {
     fn jsonl_writer_emits_one_line_per_row_with_a_trailing_newline() {
         let cols = [col("id", TypeClass::Int { bits: 32 })];
         let refs: Vec<&Column> = cols.iter().collect();
-        let mut w = Box::new(JsonlWriter::new("t.jsonl".into(), refs, JsonMode::Unroll));
+        let mut w = Box::new(JsonlWriter::new(
+            "t.jsonl".into(),
+            refs,
+            JsonMode::Unroll,
+            false,
+        ));
         w.write_row(&[Value::Int(1)]).unwrap();
         w.write_row(&[Value::Int(2)]).unwrap();
         let out = w.finish().unwrap();
@@ -1006,7 +1026,12 @@ mod tests {
     fn a_table_with_no_rows_produces_an_empty_file() {
         let cols = [col("id", TypeClass::Int { bits: 32 })];
         let refs: Vec<&Column> = cols.iter().collect();
-        let w = Box::new(JsonlWriter::new("t.jsonl".into(), refs, JsonMode::Unroll));
+        let w = Box::new(JsonlWriter::new(
+            "t.jsonl".into(),
+            refs,
+            JsonMode::Unroll,
+            false,
+        ));
         let out = w.finish().unwrap();
         assert!(
             out[0].bytes.is_empty(),

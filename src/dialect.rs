@@ -94,6 +94,16 @@ pub trait Dialect: Send + Sync {
         Vec::new()
     }
 
+    /// Bulk-load statement taking a CSV stream on stdin, when the engine has
+    /// one. `None` means fall back to one INSERT per row.
+    ///
+    /// Only usable for modes with no conflict handling, since a bulk load has
+    /// nowhere to put an ON CONFLICT clause.
+    fn copy_in_statement(&self, table: &Table, columns: &[&Column]) -> Option<String> {
+        let _ = (table, columns);
+        None
+    }
+
     /// Statement that empties a table.
     ///
     /// Deliberately `DELETE FROM` rather than `TRUNCATE` on both engines:
@@ -212,6 +222,20 @@ impl Dialect for Postgres {
         // Postgres errors rather than ignoring a request to defer a constraint
         // that is not DEFERRABLE.
         all_deferrable.then_some("SET CONSTRAINTS ALL DEFERRED")
+    }
+
+    fn copy_in_statement(&self, table: &Table, columns: &[&Column]) -> Option<String> {
+        // COPY's CSV dialect is the one seedle already writes: an unquoted
+        // empty field is NULL and a quoted one is the empty string.
+        Some(format!(
+            "COPY {} ({}) FROM STDIN WITH (FORMAT csv)",
+            self.quote_table(&table.id),
+            columns
+                .iter()
+                .map(|c| self.quote_ident(&c.name))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
     }
 
     fn sequence_fixups(&self, table: &Table) -> Vec<String> {

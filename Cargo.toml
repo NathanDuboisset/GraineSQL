@@ -45,7 +45,9 @@ anyhow = "1"
 blake3 = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 csv = "1"
+flate2 = "1"
 dotenvy = "0.15"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 indexmap = { version = "2", features = ["serde"] }

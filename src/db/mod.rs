@@ -5,11 +5,12 @@
 //! `Vec<Option<String>>` regardless of engine. That keeps a single decode path
 //! in [`crate::value`] and removes any dependence on driver type mapping.
 
+pub mod mongo;
 pub mod mysql;
 pub mod postgres;
 pub mod sqlite;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use sqlx::mysql::{MySqlPool, MySqlPoolOptions};
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
@@ -510,6 +511,21 @@ impl PinnedConn<'_> {
                     .rows_affected())
             }
             PinnedConn::Phantom(_) => unreachable!("phantom variant is never constructed"),
+        }
+    }
+
+    /// Stream `data` into a `COPY ... FROM STDIN` statement.
+    ///
+    /// Postgres only; the other engines have no equivalent that works over a
+    /// pooled connection without server-side file access.
+    pub async fn copy_in(&mut self, sql: &str, data: &[u8]) -> Result<u64> {
+        match self {
+            PinnedConn::Pg(c) => {
+                let mut sink = c.copy_in_raw(sql).await.with_context(|| failed_sql(sql))?;
+                sink.send(data).await.context("sending the copy stream")?;
+                sink.finish().await.with_context(|| failed_sql(sql))
+            }
+            _ => bail!("this engine has no COPY FROM STDIN"),
         }
     }
 
