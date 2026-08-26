@@ -2,10 +2,10 @@
 
 use std::collections::BTreeSet;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use indexmap::IndexMap;
 
-use crate::db::Db;
+use crate::db::{Db, Fields};
 use crate::schema::{Column, ForeignKey, Schema, Table, TableId, TypeClass};
 
 /// Schemas that never hold user data.
@@ -268,12 +268,12 @@ pub fn fix_sequence_sql(id: &TableId, column: &str) -> String {
                   COALESCE((SELECT MAX({}) FROM {}), 0) + 1,
                   false)
            WHERE pg_get_serial_sequence({}, {}) IS NOT NULL",
-        quote_literal(&table_ref_literal(id)),
-        quote_literal(column),
+        crate::dialect::quote_literal(&table_ref_literal(id)),
+        crate::dialect::quote_literal(column),
         quote_ident(column),
         quote_table(id),
-        quote_literal(&table_ref_literal(id)),
-        quote_literal(column),
+        crate::dialect::quote_literal(&table_ref_literal(id)),
+        crate::dialect::quote_literal(column),
     )
 }
 
@@ -292,47 +292,11 @@ fn quote_table(id: &TableId) -> String {
     table_ref_literal(id)
 }
 
-fn quote_literal(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
-}
-
 fn split_list(s: &str) -> Vec<String> {
     if s.is_empty() {
         return Vec::new();
     }
     s.split(',').map(|p| p.to_string()).collect()
-}
-
-/// Positional accessor over a text row, with errors that name the query.
-struct Fields<'a> {
-    row: &'a [Option<String>],
-    what: &'static str,
-}
-
-impl<'a> Fields<'a> {
-    fn new(row: &'a [Option<String>], expected: usize, what: &'static str) -> Result<Self> {
-        if row.len() != expected {
-            bail!(
-                "{what} introspection returned {} columns, expected {expected}",
-                row.len()
-            );
-        }
-        Ok(Self { row, what })
-    }
-
-    fn text(&self, i: usize) -> Result<&str> {
-        self.row[i]
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("{} introspection: column {i} was NULL", self.what))
-    }
-
-    fn opt(&self, i: usize) -> Option<&str> {
-        self.row[i].as_deref()
-    }
-
-    fn bool(&self, i: usize) -> Result<bool> {
-        Ok(matches!(self.text(i)?, "t" | "true" | "1"))
-    }
 }
 
 // ---------------------------------------------------------------------------

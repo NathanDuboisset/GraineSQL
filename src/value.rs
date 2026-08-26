@@ -369,10 +369,24 @@ fn format_time(t: NaiveTime) -> String {
     }
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
+/// Lowercase hex, the form seedle writes.
+pub fn hex_encode(bytes: &[u8]) -> String {
+    hex(bytes, false)
+}
+
+/// Uppercase hex, which `UNHEX` and `X'..'` literals conventionally take.
+pub fn hex_encode_upper(bytes: &[u8]) -> String {
+    hex(bytes, true)
+}
+
+fn hex(bytes: &[u8], upper: bool) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for b in bytes {
-        let _ = write!(out, "{b:02x}");
+        let _ = if upper {
+            write!(out, "{b:02X}")
+        } else {
+            write!(out, "{b:02x}")
+        };
     }
     out
 }

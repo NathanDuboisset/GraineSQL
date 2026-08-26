@@ -4,8 +4,6 @@
 //! and clause-building rules, the parts most likely to be subtly wrong, are
 //! unit-testable without a database.
 
-use std::fmt::Write as _;
-
 use anyhow::{Result, bail};
 
 use crate::config::{Engine, LoadMode};
@@ -291,13 +289,18 @@ impl Dialect for Postgres {
     }
 }
 
-/// Single-quoted Postgres string literal.
+/// Single-quoted SQL string literal, escaping only the quote.
 ///
-/// Correct under `standard_conforming_strings = on` (the default since 9.1),
-/// where a backslash inside a plain literal is an ordinary character. Postgres
-/// text cannot contain a NUL byte at all, so there is no such case to handle.
-fn pg_quote(s: &str) -> String {
+/// Correct for Postgres under `standard_conforming_strings = on` (the default
+/// since 9.1) and for SQLite, in both of which a backslash inside a plain
+/// literal is an ordinary character. MySQL escapes with backslashes too and
+/// needs [`mysql_quote`].
+pub(crate) fn quote_literal(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
+}
+
+fn pg_quote(s: &str) -> String {
+    quote_literal(s)
 }
 
 // ---------------------------------------------------------------------------
@@ -363,7 +366,7 @@ impl Dialect for Mysql {
             // coerce the strings "true"/"false".
             Value::Bool(b) => Some(if *b { "1" } else { "0" }.to_string()),
             // UNHEX() wants bare hex, without our canonical `\x` marker.
-            Value::Bytes(b) => Some(hex_upper(b)),
+            Value::Bytes(b) => Some(crate::value::hex_encode_upper(b)),
             // MySQL's DATETIME parser wants a space separator and no zone
             // suffix; the session is pinned to UTC so dropping `Z` is safe.
             Value::Timestamp(_) | Value::TimestampTz(_) => {
@@ -396,7 +399,7 @@ impl Dialect for Mysql {
                 crate::value::format_float(*f)
             ),
             Value::Bytes(b) if b.is_empty() => "''".to_string(),
-            Value::Bytes(b) => format!("X'{}'", hex_upper(b)),
+            Value::Bytes(b) => format!("X'{}'", crate::value::hex_encode_upper(b)),
             _ => {
                 let text = self
                     .bind_text(col, v)?
@@ -519,7 +522,7 @@ impl Dialect for Sqlite {
             Value::Null => None,
             // No boolean type: 0 and 1, as every SQLite client expects.
             Value::Bool(b) => Some(if *b { "1" } else { "0" }.to_string()),
-            Value::Bytes(b) => Some(hex_upper(b)),
+            Value::Bytes(b) => Some(crate::value::hex_encode_upper(b)),
             Value::Float(f) if !f.is_finite() => bail!(
                 "column {} holds {} but SQLite cannot store non-finite floats",
                 col.name,
@@ -542,10 +545,10 @@ impl Dialect for Sqlite {
                 crate::value::format_float(*f)
             ),
             Value::Bytes(b) if b.is_empty() => "x''".to_string(),
-            Value::Bytes(b) => format!("x'{}'", hex_upper(b)),
+            Value::Bytes(b) => format!("x'{}'", crate::value::hex_encode_upper(b)),
             other => {
                 let text = other.to_text().expect("null was handled above");
-                sqlite_quote(&text)
+                quote_literal(&text)
             }
         })
     }
@@ -622,11 +625,6 @@ impl Dialect for Sqlite {
     }
 }
 
-/// Single-quoted SQLite string literal. Only the quote is special.
-fn sqlite_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
-}
-
 /// Single-quoted MySQL string literal.
 ///
 /// MySQL treats backslash as an escape character in string literals (unless
@@ -662,14 +660,6 @@ fn is_bare_numeric_literal(s: &str) -> bool {
         && body
             .bytes()
             .all(|b| b.is_ascii_digit() || matches!(b, b'.' | b'e' | b'E' | b'-' | b'+'))
-}
-
-fn hex_upper(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        let _ = write!(out, "{b:02X}");
-    }
-    out
 }
 
 #[cfg(test)]

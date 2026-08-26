@@ -29,6 +29,17 @@ jobs:
           --health-retries 5
         ports:
           - 5432:5432
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: seedle
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pseedle"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 3306:3306
 
     steps:
       - uses: actions/checkout@v4
@@ -42,9 +53,11 @@ jobs:
 
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets --all-features
+      # SQLite needs no service and always runs.
       - name: Test
         env:
           SEEDLE_TEST_PG: postgres://postgres:postgres@localhost:5432
+          SEEDLE_TEST_MYSQL: mysql://root:seedle@127.0.0.1:3306
         run: cargo test --all-features
 
   storage:

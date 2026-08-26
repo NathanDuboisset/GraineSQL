@@ -49,6 +49,42 @@ fn edit_distance(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
+/// Positional accessor over an introspection row, with errors naming the query.
+///
+/// `PRAGMA` results are variable-width, so `new` takes a minimum rather than an
+/// exact count.
+pub struct Fields<'a> {
+    row: &'a [Option<String>],
+    what: &'static str,
+}
+
+impl<'a> Fields<'a> {
+    pub fn new(row: &'a [Option<String>], min: usize, what: &'static str) -> Result<Self> {
+        anyhow::ensure!(
+            row.len() >= min,
+            "{what} introspection returned {} columns, expected at least {min}",
+            row.len()
+        );
+        Ok(Self { row, what })
+    }
+
+    pub fn text(&self, i: usize) -> Result<&str> {
+        self.row
+            .get(i)
+            .and_then(|v| v.as_deref())
+            .ok_or_else(|| anyhow::anyhow!("{} introspection: column {i} was NULL", self.what))
+    }
+
+    pub fn opt(&self, i: usize) -> Option<&str> {
+        self.row.get(i).and_then(|v| v.as_deref())
+    }
+
+    /// A boolean in whichever spelling the engine uses.
+    pub fn bool(&self, i: usize) -> Result<bool> {
+        Ok(matches!(self.text(i)?, "t" | "true" | "1"))
+    }
+}
+
 /// Introspect the live schema. The single dispatch point per engine.
 pub async fn introspect(db: &Db) -> Result<Schema> {
     match db.engine().dialect() {

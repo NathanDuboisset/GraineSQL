@@ -13,7 +13,7 @@
 use anyhow::{Context, Result};
 use indexmap::IndexMap;
 
-use crate::db::Db;
+use crate::db::{Db, Fields};
 use crate::dialect::Dialect as _;
 use crate::schema::{Column, ForeignKey, Schema, Table, TableId, TypeClass};
 
@@ -208,12 +208,8 @@ pub fn fix_sequence_sql(id: &TableId, column: &str) -> String {
          WHERE name = {}",
         d.quote_ident(column),
         d.quote_table(id),
-        quote_literal(&id.name)
+        crate::dialect::quote_literal(&id.name)
     )
-}
-
-fn quote_literal(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
 }
 
 /// Map a declared type onto a [`TypeClass`] using SQLite's affinity rules.
@@ -285,33 +281,6 @@ fn type_args(d: &str) -> impl Iterator<Item = &str> {
         .map(|(args, _)| args)
         .unwrap_or("");
     inner.split(',').map(|a| a.trim()).filter(|a| !a.is_empty())
-}
-
-/// Positional accessor over a text row.
-struct Fields<'a> {
-    row: &'a [Option<String>],
-    what: &'static str,
-}
-
-impl<'a> Fields<'a> {
-    fn new(row: &'a [Option<String>], expected: usize, what: &'static str) -> Result<Self> {
-        anyhow::ensure!(
-            row.len() >= expected,
-            "{what} returned {} columns, expected at least {expected}",
-            row.len()
-        );
-        Ok(Self { row, what })
-    }
-
-    fn text(&self, i: usize) -> Result<&str> {
-        self.row[i]
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("{}: column {i} was NULL", self.what))
-    }
-
-    fn opt(&self, i: usize) -> Option<&str> {
-        self.row.get(i).and_then(|v| v.as_deref())
-    }
 }
 
 #[cfg(test)]

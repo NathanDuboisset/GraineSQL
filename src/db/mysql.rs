@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 use anyhow::{Context, Result, bail};
 use indexmap::IndexMap;
 
-use crate::db::Db;
+use crate::db::{Db, Fields};
 use crate::dialect::Dialect as _;
 use crate::schema::{Column, ForeignKey, Schema, Table, TableId, TypeClass};
 
@@ -375,33 +375,6 @@ fn split_list(s: &str) -> Vec<String> {
         return Vec::new();
     }
     s.split(',').map(|p| p.to_string()).collect()
-}
-
-struct Fields<'a> {
-    row: &'a [Option<String>],
-    what: &'static str,
-}
-
-impl<'a> Fields<'a> {
-    fn new(row: &'a [Option<String>], expected: usize, what: &'static str) -> Result<Self> {
-        if row.len() != expected {
-            bail!(
-                "{what} introspection returned {} columns, expected {expected}",
-                row.len()
-            );
-        }
-        Ok(Self { row, what })
-    }
-
-    fn text(&self, i: usize) -> Result<&str> {
-        self.row[i]
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("{} introspection: column {i} was NULL", self.what))
-    }
-
-    fn opt(&self, i: usize) -> Option<&str> {
-        self.row[i].as_deref()
-    }
 }
 
 #[cfg(test)]
