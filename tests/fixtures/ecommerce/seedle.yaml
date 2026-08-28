@@ -1,0 +1,36 @@
+# A six-deep foreign-key chain with a composite key at the bottom.
+#
+# The same seed files load into every engine listed here. `SEEDLE_TARGET` picks
+# which one the test is driving; the URLs come from the environment so the
+# fixture carries no credentials.
+version: 1
+
+sources:
+  postgres:
+    engine: postgres
+    process_env: true
+    url_var: SEEDLE_FIXTURE_PG
+    default: true
+  mysql:
+    engine: mysql
+    process_env: true
+    url_var: SEEDLE_FIXTURE_MYSQL
+  sqlite:
+    engine: sqlite
+    process_env: true
+    url_var: SEEDLE_FIXTURE_SQLITE
+
+export:
+  out: seed
+  format: jsonl
+
+load:
+  default: upsert
+
+tables:
+  regions: {}
+  countries: {}
+  customers: {}
+  products: {}
+  orders: {}
+  order_items: {}

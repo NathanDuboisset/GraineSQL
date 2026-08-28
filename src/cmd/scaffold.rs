@@ -218,14 +218,11 @@ pub async fn cmd_status(ctx: &Ctx) -> Result<()> {
             })
             .map(|f| f.rows);
         let live_rows = db
-            .query_text(&format!(
-                "SELECT count(*) FROM {}",
-                db.dialect().quote_table(&id)
-            ))
+            .query_text(&db.dialect().count_query(&id))
             .await
             .ok()
             .and_then(|r| r.first().and_then(|r| r.first().cloned().flatten()))
-            .and_then(|v| v.parse::<u64>().ok());
+            .and_then(|v| v.trim().parse::<u64>().ok());
         tables.push((id, recorded, live_rows));
     }
 

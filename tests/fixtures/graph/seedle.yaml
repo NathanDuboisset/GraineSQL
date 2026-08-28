@@ -1,0 +1,36 @@
+# Ordering: a self-reference, a diamond, and a two-table cycle.
+#
+# The same seed files load into every engine listed here. The URLs come from the
+# environment so the fixture carries no credentials.
+version: 1
+
+sources:
+  postgres:
+    engine: postgres
+    process_env: true
+    url_var: SEEDLE_FIXTURE_PG
+    default: true
+  mysql:
+    engine: mysql
+    process_env: true
+    url_var: SEEDLE_FIXTURE_MYSQL
+  sqlite:
+    engine: sqlite
+    process_env: true
+    url_var: SEEDLE_FIXTURE_SQLITE
+
+export:
+  out: seed
+  format: jsonl
+
+load:
+  default: upsert
+
+tables:
+  employees: {}
+  top: {}
+  t_left: {}
+  t_right: {}
+  bottom: {}
+  teams: {}
+  members: {}

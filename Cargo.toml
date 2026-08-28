@@ -73,7 +73,7 @@ sha2 = "0.10"
 # The MySQL test harness talks to the server directly rather than shelling out
 # to a client that may not be installed.
 sqlx = { version = "0.8", default-features = false, features = [
-    "runtime-tokio", "tls-rustls-ring", "mysql",
+    "runtime-tokio", "tls-rustls-ring", "postgres", "mysql", "sqlite",
 ] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

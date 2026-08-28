@@ -1,0 +1,4 @@
+{"id":1,"manager_id":null,"name":"Boss"}
+{"id":2,"manager_id":1,"name":"Manager"}
+{"id":3,"manager_id":2,"name":"Worker"}
+{"id":4,"manager_id":2,"name":"Other worker"}

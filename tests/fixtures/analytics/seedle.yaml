@@ -1,0 +1,27 @@
+# Numeric and temporal extremes.
+#
+# Postgres and MySQL only: SQLite has no exact decimal, so the trailing zeros
+# these rows depend on are gone before seedle sees the value.
+version: 1
+
+sources:
+  postgres:
+    engine: postgres
+    process_env: true
+    url_var: SEEDLE_FIXTURE_PG
+    default: true
+  mysql:
+    engine: mysql
+    process_env: true
+    url_var: SEEDLE_FIXTURE_MYSQL
+
+export:
+  out: seed
+  format: jsonl
+
+load:
+  default: upsert
+
+tables:
+  accounts: {}
+  samples: {}

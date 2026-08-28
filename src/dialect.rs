@@ -27,6 +27,23 @@ pub trait Dialect: Send + Sync {
         "SELECT version()"
     }
 
+    /// Row count as text.
+    ///
+    /// The cast matters: a bare `count(*)` comes back as a 64-bit integer, which
+    /// the text-oriented row reader cannot decode.
+    fn count_query(&self, id: &TableId) -> String {
+        format!(
+            "SELECT CAST(count(*) AS {}) FROM {}",
+            self.text_cast_type(),
+            self.quote_table(id)
+        )
+    }
+
+    /// The type name this engine uses in a cast to text.
+    fn text_cast_type(&self) -> &'static str {
+        "TEXT"
+    }
+
     /// Expression that reads `col` as canonical text.
     fn read_expr(&self, col: &Column) -> String;
 
@@ -329,6 +346,11 @@ impl Dialect for Mysql {
             // writing a corrupted value.
             "SET sql_mode = 'STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION'",
         ]
+    }
+
+    fn text_cast_type(&self) -> &'static str {
+        // MySQL has no TEXT cast target; CHAR is the one it takes.
+        "CHAR"
     }
 
     fn read_expr(&self, col: &Column) -> String {

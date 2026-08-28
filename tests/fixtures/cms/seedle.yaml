@@ -1,0 +1,33 @@
+# JSON documents, unicode, embedded quotes and newlines, and nulls.
+#
+# The same seed files load into every engine listed here. The URLs come from the
+# environment so the fixture carries no credentials.
+version: 1
+
+sources:
+  postgres:
+    engine: postgres
+    process_env: true
+    url_var: SEEDLE_FIXTURE_PG
+    default: true
+  mysql:
+    engine: mysql
+    process_env: true
+    url_var: SEEDLE_FIXTURE_MYSQL
+  sqlite:
+    engine: sqlite
+    process_env: true
+    url_var: SEEDLE_FIXTURE_SQLITE
+
+export:
+  out: seed
+  format: jsonl
+  json: unroll
+
+load:
+  default: upsert
+
+tables:
+  authors: {}
+  posts: {}
+  comments: {}

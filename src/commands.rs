@@ -723,9 +723,12 @@ async fn build_plans(
 }
 
 pub async fn cmd_plan(ctx: &Ctx, tables: Option<Vec<String>>, tree: bool) -> Result<()> {
-    let (_src, db) = ctx.connect(1).await?;
+    let (src, db) = ctx.connect(1).await?;
     let live = introspect(&db, &ctx.cfg).await?;
-    let (_loads, plans) = build_plans(ctx, &db, &live, &IndexMap::new(), tables, false).await?;
+    // Without the live bucket settings the drift check has nothing to compare
+    // against and would report every configured bucket as missing.
+    let live_buckets = live_bucket_settings(ctx, &src, None).await?;
+    let (_loads, plans) = build_plans(ctx, &db, &live, &live_buckets, tables, false).await?;
 
     if !ctx.json && tree {
         print!("{}", load::render_tree(&db.source_name, &plans, &live));

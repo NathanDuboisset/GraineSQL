@@ -1,0 +1,6 @@
+{"order_id":1001,"product_sku":"SKU-KEYBOARD","quantity":1,"unit_price_cents":12900}
+{"order_id":1001,"product_sku":"SKU-MOUSE","quantity":1,"unit_price_cents":4550}
+{"order_id":1002,"product_sku":"SKU-MONITOR","quantity":1,"unit_price_cents":34999}
+{"order_id":1003,"product_sku":"SKU-CABLE","quantity":3,"unit_price_cents":1199}
+{"order_id":1003,"product_sku":"SKU-MOUSE","quantity":1,"unit_price_cents":3351}
+{"order_id":1004,"product_sku":"SKU-CABLE","quantity":1,"unit_price_cents":1199}

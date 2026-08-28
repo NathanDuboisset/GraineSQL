@@ -1,0 +1,3 @@
+{"id":1,"account_id":1,"exact":12345678901234567890.1234567890,"small_int":32767,"big_int":9223372036854775807,"approx":3.141592653589793,"payload":null,"happened_at":"2024-11-03T05:30:00Z","wall_clock":"2024-01-01T00:00:00","on_day":"2024-02-29","note":"the DST repeat hour, resolved by its offset"}
+{"id":2,"account_id":1,"exact":-0.0000000001,"small_int":-32768,"big_int":-9223372036854775808,"approx":0,"payload":null,"happened_at":"2024-11-03T06:30:00Z","wall_clock":"2024-12-31T23:59:59","on_day":"2025-01-01","note":"the same wall clock, one hour later"}
+{"id":3,"account_id":2,"exact":0.0000000000,"small_int":0,"big_int":0,"approx":0.1,"payload":null,"happened_at":null,"wall_clock":null,"on_day":null,"note":null}
