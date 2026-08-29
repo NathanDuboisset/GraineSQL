@@ -1,4 +1,4 @@
-//! `seedle.yaml` parsing, validation, and per-table defaults resolution.
+//! `graine.yaml` parsing, validation, and per-table defaults resolution.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::schema::TableId;
 
-pub const CONFIG_FILENAME: &str = "seedle.yaml";
-pub const LOCK_FILENAME: &str = "seedle.lock";
+pub const CONFIG_FILENAME: &str = "graine.yaml";
+pub const LOCK_FILENAME: &str = "graine.lock";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -46,7 +46,7 @@ impl Engine {
         matches!(self, Engine::Supabase)
     }
 
-    /// Guess the engine from a connection URL, for `seedle init`.
+    /// Guess the engine from a connection URL, for `graine init`.
     pub fn from_url(url: &str) -> Engine {
         let scheme = url.split_once("://").map(|(s, _)| s).unwrap_or("");
         match scheme {
@@ -364,7 +364,7 @@ impl Config {
         Ok(cfg)
     }
 
-    /// Find `seedle.yaml` in `start` or any ancestor directory.
+    /// Find `graine.yaml` in `start` or any ancestor directory.
     pub fn discover(start: &Path) -> Result<PathBuf> {
         let start = start
             .canonicalize()
@@ -376,7 +376,7 @@ impl Config {
             }
         }
         bail!(
-            "no {CONFIG_FILENAME} found in {} or any parent directory (run `seedle init`)",
+            "no {CONFIG_FILENAME} found in {} or any parent directory (run `graine init`)",
             start.display()
         )
     }

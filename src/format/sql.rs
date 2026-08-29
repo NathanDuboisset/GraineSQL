@@ -286,7 +286,7 @@ mod tests {
 /// Read back the `INSERT` statements this module writes.
 ///
 /// Not a SQL parser: it accepts the shape [`SqlWriter`] emits and rejects
-/// anything else rather than guessing. That is enough to round-trip seedle's own
+/// anything else rather than guessing. That is enough to round-trip GraineSQL's own
 /// output, and it fails loudly on a hand-written file instead of silently
 /// misreading it.
 pub fn read_sql(
@@ -314,7 +314,7 @@ pub fn read_sql(
     for stmt in split_statements(&text, esc) {
         let Some((header, values)) = split_insert(&stmt.text) else {
             bail!(
-                "{name}:{}: expected an INSERT ... VALUES statement, which is all seedle \
+                "{name}:{}: expected an INSERT ... VALUES statement, which is all GraineSQL \
                  writes and all it reads back",
                 stmt.line
             );

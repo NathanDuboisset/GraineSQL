@@ -164,7 +164,7 @@ pub fn render_dangling(items: &[Dangling]) -> String {
     }
     out.push_str(
         "\nLoading this into an empty database would fail partway through. \
-         Fix seedle.yaml, or pass --no-fk-check to export anyway.\n",
+         Fix graine.yaml, or pass --no-fk-check to export anyway.\n",
     );
     out
 }

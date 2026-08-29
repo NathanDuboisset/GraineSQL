@@ -1,12 +1,12 @@
 //! MongoDB support: the shape, and what still has to be decided.
 //!
 //! Nothing here talks to a server yet. What exists is the mapping from Mongo's
-//! model onto seedle's, worked out far enough to show where it fits and where it
+//! model onto GraineSQL's, worked out far enough to show where it fits and where it
 //! does not, with the open questions written down rather than guessed at.
 //!
 //! # How it maps
 //!
-//! | seedle | MongoDB |
+//! | GraineSQL | MongoDB |
 //! |---|---|
 //! | table | collection |
 //! | column | field, at the top level of a document |
@@ -38,7 +38,7 @@
 //! proportion of documents. [`FieldProfile`] is that. The question is what to do
 //! with it, and it is a policy decision rather than a technical one:
 //!
-//! - Treating a profile as a contract makes `seedle load` fail when a field the
+//! - Treating a profile as a contract makes `graine load` fail when a field the
 //!   seed files never saw appears. That is wrong: in Mongo, a new field is
 //!   normal and breaks nothing.
 //! - Treating it as advisory makes the lock decorative for most collections,
@@ -93,7 +93,7 @@ impl FieldProfile {
     }
 }
 
-/// Map a BSON type name onto seedle's classification.
+/// Map a BSON type name onto GraineSQL's classification.
 ///
 /// Used for both validator `bsonType` keywords and observed types. A field with
 /// several types has no single class, so callers pass each in turn and treat a

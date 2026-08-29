@@ -1,5 +1,5 @@
 -- Self-reference, a diamond, and a two-table cycle. MySQL has no deferrable
--- constraints; seedle suspends FOREIGN_KEY_CHECKS for the transaction instead.
+-- constraints; GraineSQL suspends FOREIGN_KEY_CHECKS for the transaction instead.
 CREATE TABLE employees (
     id         INT PRIMARY KEY,
     manager_id INT NULL,

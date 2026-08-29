@@ -1,14 +1,14 @@
-# seedle
+# GraineSQL
 
 Export selected rows and storage buckets from a database into deterministic,
 diffable seed files. Load them back into another database in foreign-key order.
 
 ```
-seedle export                 # prod  -> seed/*.jsonl + buckets/   (commit these)
-seedle load --source dev      # files -> dev database and its buckets
+graine export                 # prod  -> seed/*.jsonl + buckets/   (commit these)
+graine load --source dev      # files -> dev database and its buckets
 ```
 
-A `seedle.lock` file records the schema the seed files were written against.
+A `graine.lock` file records the schema the seed files were written against.
 Every command checks the live database against it and **aborts on breaking drift
 before touching anything**, so a schema change surfaces as a readable diff rather
 than a half-applied load.
@@ -19,18 +19,18 @@ than a half-applied load.
 order is unspecified, so committing it produces diff noise on every run.
 Hand-written seed SQL diffs cleanly but rots silently when the schema moves.
 
-seedle exports the tables you name, filtered how you say, byte-identically run
+GraineSQL exports the tables you name, filtered how you say, byte-identically run
 to run, and refuses to run when the schema no longer matches the files.
 
 ## Install
 
 ```sh
-brew install nathanduboisset/tap/seedle   # macOS and Linux
-cargo binstall seedle                        # prebuilt binary, no compile
-cargo install seedle                         # from source
+brew install nathanduboisset/tap/grainesql   # macOS and Linux
+cargo binstall grainesql                     # prebuilt binary, no compile
+cargo install grainesql                      # from source
 ```
 
-Or download a binary from [Releases](https://github.com/NathanDuboisset/seedle/releases);
+Or download a binary from [Releases](https://github.com/NathanDuboisset/grainesql/releases);
 each archive ships a `.sha256`.
 
 Needs Rust 1.85+ to build. Postgres 12+, Supabase, MySQL 8+ or SQLite at
@@ -39,17 +39,17 @@ runtime.
 ## Getting started
 
 ```sh
-seedle init --url postgres://localhost/myapp   # writes seedle.yaml, lists tables
-$EDITOR seedle.yaml                            # trim to the tables you want
-seedle lock                                    # snapshot the schema
-seedle export                                  # write seed/
+graine init --url postgres://localhost/myapp   # writes graine.yaml, lists tables
+$EDITOR graine.yaml                            # trim to the tables you want
+graine lock                                    # snapshot the schema
+graine export                                  # write seed/
 git add seed/                                  # commit
 ```
 
 Then in a fresh environment:
 
 ```sh
-seedle load --source dev
+graine load --source dev
 ```
 
 ## Configuration
@@ -72,7 +72,7 @@ sources:
     env_file: .env
 
 export:
-  out: seed                      # holds seedle.lock and the data files
+  out: seed                      # holds graine.lock and the data files
   format: jsonl                  # jsonl | jsonl.gz | csv | sql
   json: unroll                   # nest json columns instead of escaping them
   sql_batch: 100                 # rows per INSERT when format: sql
@@ -108,7 +108,7 @@ Per-table keys: `where`, `order_by`, `limit`, `columns`, `exclude_columns`,
 
 ### Sources
 
-Credentials never live in `seedle.yaml`. A source reads them from either an
+Credentials never live in `graine.yaml`. A source reads them from either an
 `env_file` it names or, with `process_env: true`, the process environment. An
 `env_file` still falls back to the environment for a variable it does not
 contain, which is how CI usually supplies them.
@@ -138,26 +138,26 @@ the key in `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_SECRET_KEY` or
 
 | Command | What it does |
 |---|---|
-| `seedle init` | Write a starter config, optionally pre-filled from a live database |
-| `seedle add TABLE...` | Append tables to the config, with the parents they need |
-| `seedle sources` | List sources, resolve credentials, check connectivity |
-| `seedle lock` | Introspect and write `seedle.lock` |
-| `seedle lock --check` | Exit non-zero if the live schema differs. The CI gate |
-| `seedle diff` | Show the drift, classified by severity |
-| `seedle status` | Whether the seed files are current: drift plus row counts |
-| `seedle export` | Pull rows and buckets into seed files |
-| `seedle plan` | Load order, row counts, per-table action. Writes nothing |
-| `seedle plan --tree` | The same, drawn as a dependency tree |
-| `seedle load` | Push seed files into a database |
-| `seedle verify` | Re-hash the seed files and bucket objects against the lock. Needs no network |
-| `seedle completions SHELL` | Print a completion script |
+| `graine init` | Write a starter config, optionally pre-filled from a live database |
+| `graine add TABLE...` | Append tables to the config, with the parents they need |
+| `graine sources` | List sources, resolve credentials, check connectivity |
+| `graine lock` | Introspect and write `graine.lock` |
+| `graine lock --check` | Exit non-zero if the live schema differs. The CI gate |
+| `graine diff` | Show the drift, classified by severity |
+| `graine status` | Whether the seed files are current: drift plus row counts |
+| `graine export` | Pull rows and buckets into seed files |
+| `graine plan` | Load order, row counts, per-table action. Writes nothing |
+| `graine plan --tree` | The same, drawn as a dependency tree |
+| `graine load` | Push seed files into a database |
+| `graine verify` | Re-hash the seed files and bucket objects against the lock. Needs no network |
+| `graine completions SHELL` | Print a completion script |
 
 Global flags: `--config`, `--source`, `--json`, `-v`, `-q`, `-y`.
 `--tables a,b` narrows `export`, `plan` and `load`; `--buckets a,b` and
 `--no-buckets` do the same for storage.
 
 ```
-$ seedle plan --tree
+$ graine plan --tree
 load order for source "dev":
 public.countries  3 rows
 public.orgs  3 rows
@@ -170,9 +170,9 @@ public.orgs  3 rows
 Completions install the usual way:
 
 ```sh
-seedle completions bash > /etc/bash_completion.d/seedle
-seedle completions zsh  > "${fpath[1]}/_seedle"
-seedle completions fish > ~/.config/fish/completions/seedle.fish
+graine completions bash > /etc/bash_completion.d/graine
+graine completions zsh  > "${fpath[1]}/_graine"
+graine completions fish > ~/.config/fish/completions/graine.fish
 ```
 
 ### Referential completeness
@@ -183,7 +183,7 @@ checks every foreign key in the export against the export and aborts if any
 value has no matching parent row:
 
 ```
-$ seedle export
+$ graine export
 error: the export is not referentially complete:
   public.orders(user_id) -> public.users(id): 12 values with no matching row
     e.g. 9f2c4b1e-...; 0d1e2f3a-...
@@ -222,14 +222,14 @@ seed/buckets/project_files/
   objects/<key>      the bytes, mirroring the object key
 ```
 
-The manifest carries a sha256 per object, and `seedle.lock` records one hash
+The manifest carries a sha256 per object, and `graine.lock` records one hash
 over the manifest, so a single value covers every byte in the bucket.
-`seedle verify` re-hashes every object from disk with no network access.
+`graine verify` re-hashes every object from disk with no network access.
 
 Bucket *settings* (public, size limit, allowed mime types) are schema, created by
-migrations. seedle records them in `seedle.lock` to check against and never
+migrations. GraineSQL records them in `graine.lock` to check against and never
 writes them: **a bucket that does not exist in the target is an error, not
-something seedle creates.**
+something GraineSQL creates.**
 
 Loading uploads with upsert, after the database transaction commits. Object
 storage has no transaction to join, so uploading earlier could leave files behind
@@ -270,7 +270,7 @@ silently stops carrying data.
 - a bucket's visibility or mime allowlist changed
 
 ```
-$ seedle diff
+$ graine diff
 
 breaking:
   public.countries.region  column added (text, NOT NULL with no default)
@@ -282,10 +282,10 @@ needs confirmation:
   public.employees.name    column dropped (was text)
                              the seed files carry data for it, which will be discarded
 
-2 breaking, 1 needing confirmation, 0 benign. Review, then re-run `seedle lock` to accept.
+2 breaking, 1 needing confirmation, 0 benign. Review, then re-run `graine lock` to accept.
 ```
 
-`seedle lock` accepts the change; `--force` proceeds without it.
+`graine lock` accepts the change; `--force` proceeds without it.
 
 `export` judges the source against the lock, `load` judges the target: each
 checks the database it is about to act on.
@@ -320,14 +320,14 @@ changed row is a changed line. `json: unroll` nests json columns instead of
 escaping them.
 
 **csv**: for interop. CSV cannot natively distinguish `NULL` from the empty
-string, so seedle uses the Postgres `COPY ... CSV` convention, which round-trips:
+string, so GraineSQL uses the Postgres `COPY ... CSV` convention, which round-trips:
 
 > an **unquoted** empty field is `NULL`; a **quoted** empty field (`""`) is the
 > empty string.
 
 **sql**: batched `INSERT` statements with dialect-correct quoting and conflict
 clauses, runnable through `psql` or `mysql`. `load` reads them back, accepting
-the shape seedle writes and rejecting anything else rather than guessing.
+the shape GraineSQL writes and rejecting anything else rather than guessing.
 
 **`layout: per_row`**: one `.json` file per row, named from the primary key, in
 a directory named after the table. For small hand-edited tables where a
@@ -336,7 +336,7 @@ one line per row by definition.
 
 ## Loading
 
-`seedle load` runs inside a single transaction by default, so a failure part-way
+`graine load` runs inside a single transaction by default, so a failure part-way
 through leaves the database exactly as it was.
 
 Per-table modes:
@@ -359,14 +359,14 @@ Confirmation is required when the target is not local or the plan destroys rows.
 `--yes` skips it, `--dry-run` does everything except commit.
 
 Foreign-key cycles are detected and named. Postgres can load one only when every
-constraint in it is `DEFERRABLE`, in which case seedle defers them for the
+constraint in it is `DEFERRABLE`, in which case GraineSQL defers them for the
 transaction; otherwise it says so. A self-reference is not a cycle.
 
 ## CI
 
 ```sh
-seedle lock --check   # fails if the schema moved without the lock being updated
-seedle verify         # fails if the seed files no longer match the lock
+graine lock --check   # fails if the schema moved without the lock being updated
+graine verify         # fails if the seed files no longer match the lock
 ```
 
 `verify` needs no database.
@@ -375,11 +375,11 @@ seedle verify         # fails if the seed files no longer match the lock
 
 ```sh
 cargo test                                              # unit tests only
-SEEDLE_TEST_PG=postgres://user@localhost cargo test     # + database tests
+GRAINE_TEST_PG=postgres://user@localhost cargo test     # + database tests
 
 # Bucket tests additionally need a storage service:
-export SEEDLE_TEST_STORAGE_URL=http://127.0.0.1:54321
-export SEEDLE_TEST_STORAGE_KEY=<service-role key>
+export GRAINE_TEST_STORAGE_URL=http://127.0.0.1:54321
+export GRAINE_TEST_STORAGE_KEY=<service-role key>
 cargo test --test buckets
 ```
 

@@ -6,17 +6,17 @@ use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "seedle",
+    name = "graine",
     version,
     about = "Deterministic, git-friendly database seed export and load",
-    long_about = "seedle exports selected rows from a source database into diffable seed files, \
+    long_about = "GraineSQL exports selected rows from a source database into diffable seed files, \
                   and loads them back into another database in foreign-key order.\n\n\
-                  A seedle.lock file records the schema the seed files were written against. \
+                  A graine.lock file records the schema the seed files were written against. \
                   Every command checks the live database against it and aborts on breaking drift \
                   before touching any data."
 )]
 pub struct Cli {
-    /// Path to seedle.yaml. Defaults to the nearest one in this or a parent directory.
+    /// Path to graine.yaml. Defaults to the nearest one in this or a parent directory.
     #[arg(long, short = 'c', global = true)]
     pub config: Option<PathBuf>,
 
@@ -46,13 +46,13 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Write a starter seedle.yaml, optionally pre-filled from a live database.
+    /// Write a starter graine.yaml, optionally pre-filled from a live database.
     Init {
         /// Connection URL to introspect for the initial table list.
         #[arg(long)]
         url: Option<String>,
 
-        /// Overwrite an existing seedle.yaml.
+        /// Overwrite an existing graine.yaml.
         #[arg(long)]
         force: bool,
     },
@@ -84,7 +84,7 @@ pub enum Command {
         shell: clap_complete::Shell,
     },
 
-    /// Introspect the source and write seedle.lock.
+    /// Introspect the source and write graine.lock.
     Lock {
         /// Exit non-zero if the live schema differs from the lock, without
         /// writing. The CI form.
@@ -92,7 +92,7 @@ pub enum Command {
         check: bool,
     },
 
-    /// Show how the live schema differs from seedle.lock.
+    /// Show how the live schema differs from graine.lock.
     Diff,
 
     /// Export rows and storage buckets from the source into seed files.
@@ -194,7 +194,7 @@ mod tests {
 
     #[test]
     fn tables_accepts_a_comma_separated_list() {
-        let cli = Cli::try_parse_from(["seedle", "export", "--tables", "a,b,c"]).unwrap();
+        let cli = Cli::try_parse_from(["graine", "export", "--tables", "a,b,c"]).unwrap();
         let Command::Export { tables, .. } = cli.command else {
             panic!("expected export")
         };
@@ -203,27 +203,27 @@ mod tests {
 
     #[test]
     fn global_flags_work_after_the_subcommand() {
-        let cli = Cli::try_parse_from(["seedle", "export", "--source", "prod"]).unwrap();
+        let cli = Cli::try_parse_from(["graine", "export", "--source", "prod"]).unwrap();
         assert_eq!(cli.source.as_deref(), Some("prod"));
     }
 
     #[test]
     fn seed_is_an_alias_for_load() {
-        let cli = Cli::try_parse_from(["seedle", "seed"]).unwrap();
+        let cli = Cli::try_parse_from(["graine", "seed"]).unwrap();
         assert!(matches!(cli.command, Command::Load { .. }));
     }
 
     #[test]
     fn verbose_and_quiet_are_mutually_exclusive() {
-        assert!(Cli::try_parse_from(["seedle", "-v", "-q", "diff"]).is_err());
+        assert!(Cli::try_parse_from(["graine", "-v", "-q", "diff"]).is_err());
     }
 
     #[test]
     fn bucket_selection_and_skipping_are_mutually_exclusive() {
         assert!(
-            Cli::try_parse_from(["seedle", "export", "--buckets", "a", "--no-buckets"]).is_err()
+            Cli::try_parse_from(["graine", "export", "--buckets", "a", "--no-buckets"]).is_err()
         );
-        let cli = Cli::try_parse_from(["seedle", "export", "--buckets", "a,b"]).unwrap();
+        let cli = Cli::try_parse_from(["graine", "export", "--buckets", "a,b"]).unwrap();
         let Command::Export { buckets, .. } = cli.command else {
             panic!("expected export")
         };
@@ -232,7 +232,7 @@ mod tests {
 
     #[test]
     fn load_defaults_are_the_safe_ones() {
-        let cli = Cli::try_parse_from(["seedle", "load"]).unwrap();
+        let cli = Cli::try_parse_from(["graine", "load"]).unwrap();
         let Command::Load {
             dry_run,
             no_transaction,

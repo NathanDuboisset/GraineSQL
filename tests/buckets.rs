@@ -2,7 +2,7 @@
 //!
 //! These need a Supabase-compatible storage service, which is a separate
 //! dependency from the database, so they are gated on their own variables:
-//! `SEEDLE_TEST_STORAGE_URL` and `SEEDLE_TEST_STORAGE_KEY` (a service-role key).
+//! `GRAINE_TEST_STORAGE_URL` and `GRAINE_TEST_STORAGE_KEY` (a service-role key).
 
 mod common;
 
@@ -13,11 +13,11 @@ use common::{Fixture, dirs_differ};
 /// Skip unless a storage service is configured.
 macro_rules! require_storage {
     () => {{
-        let url = std::env::var("SEEDLE_TEST_STORAGE_URL").unwrap_or_default();
-        let key = std::env::var("SEEDLE_TEST_STORAGE_KEY").unwrap_or_default();
+        let url = std::env::var("GRAINE_TEST_STORAGE_URL").unwrap_or_default();
+        let key = std::env::var("GRAINE_TEST_STORAGE_KEY").unwrap_or_default();
         if url.trim().is_empty() || key.trim().is_empty() {
             eprintln!(
-                "skipping: set SEEDLE_TEST_STORAGE_URL and SEEDLE_TEST_STORAGE_KEY to run the \
+                "skipping: set GRAINE_TEST_STORAGE_URL and GRAINE_TEST_STORAGE_KEY to run the \
                  bucket tests"
             );
             return;
@@ -87,7 +87,7 @@ impl Storage {
     }
 
     fn put(&self, key: &str, bytes: &[u8]) {
-        let tmp = std::env::temp_dir().join(format!("seedle-upload-{}", sanitize(key)));
+        let tmp = std::env::temp_dir().join(format!("graine-upload-{}", sanitize(key)));
         std::fs::write(&tmp, bytes).unwrap();
         self.curl(&[
             "-X",
@@ -200,7 +200,7 @@ fn prepared(name: &str, base: &str, url: &str, key: &str, bucket: &str) -> Fixtu
     // The config is written by hand rather than via write_config, which does not
     // know about storage.
     std::fs::write(
-        f.path().join("seedle.yaml"),
+        f.path().join("graine.yaml"),
         format!(
             "version: 1\n\
              sources:\n  \
@@ -220,8 +220,8 @@ fn prepared(name: &str, base: &str, url: &str, key: &str, bucket: &str) -> Fixtu
 fn objects_export_with_a_hash_and_reload_intact() {
     let base = require_pg!();
     let (url, key) = require_storage!();
-    let s = Storage::new(&url, &key, "seedle_rt");
-    let f = prepared("bucket_rt", &base, &url, &key, "seedle_rt");
+    let s = Storage::new(&url, &key, "graine_rt");
+    let f = prepared("bucket_rt", &base, &url, &key, "graine_rt");
 
     // A spread of shapes: nested keys, spaces and parentheses, raw binary, an
     // empty object, and non-UTF-8 content under an ASCII key.
@@ -246,7 +246,7 @@ fn objects_export_with_a_hash_and_reload_intact() {
     f.ok(&["export", "-q"]);
 
     // The manifest records every object with a sha256.
-    let manifest = f.read_seed("buckets/seedle_rt/manifest.jsonl");
+    let manifest = f.read_seed("buckets/graine_rt/manifest.jsonl");
     assert_eq!(
         manifest.lines().count(),
         cases.len(),
@@ -291,8 +291,8 @@ fn objects_export_with_a_hash_and_reload_intact() {
 fn a_hand_edited_object_is_caught_offline() {
     let base = require_pg!();
     let (url, key) = require_storage!();
-    let s = Storage::new(&url, &key, "seedle_tamper");
-    let f = prepared("bucket_tamper", &base, &url, &key, "seedle_tamper");
+    let s = Storage::new(&url, &key, "graine_tamper");
+    let f = prepared("bucket_tamper", &base, &url, &key, "graine_tamper");
     s.put("doc.txt", b"original");
 
     f.ok(&["lock", "-q"]);
@@ -300,7 +300,7 @@ fn a_hand_edited_object_is_caught_offline() {
     f.ok(&["verify"]);
 
     // Change a byte on disk; the recorded hash no longer matches.
-    let path = f.seed_dir().join("buckets/seedle_tamper/objects/doc.txt");
+    let path = f.seed_dir().join("buckets/graine_tamper/objects/doc.txt");
     std::fs::write(&path, b"tampered").unwrap();
 
     let r = f.fail(&["verify"]);
@@ -321,15 +321,15 @@ fn a_hand_edited_object_is_caught_offline() {
 fn a_removed_object_disappears_from_the_export() {
     let base = require_pg!();
     let (url, key) = require_storage!();
-    let s = Storage::new(&url, &key, "seedle_removed");
-    let f = prepared("bucket_removed", &base, &url, &key, "seedle_removed");
+    let s = Storage::new(&url, &key, "graine_removed");
+    let f = prepared("bucket_removed", &base, &url, &key, "graine_removed");
     s.put("keep.txt", b"keep");
     s.put("drop.txt", b"drop");
 
     f.ok(&["lock", "-q"]);
     f.ok(&["export", "-q"]);
     assert_eq!(
-        f.read_seed("buckets/seedle_removed/manifest.jsonl")
+        f.read_seed("buckets/graine_removed/manifest.jsonl")
             .lines()
             .count(),
         2
@@ -338,13 +338,13 @@ fn a_removed_object_disappears_from_the_export() {
     s.delete("drop.txt");
     f.ok(&["export", "-q"]);
 
-    let manifest = f.read_seed("buckets/seedle_removed/manifest.jsonl");
+    let manifest = f.read_seed("buckets/graine_removed/manifest.jsonl");
     assert_eq!(manifest.lines().count(), 1, "{manifest}");
     assert!(manifest.contains("keep.txt"));
     // The stale local file must be gone too, or a later load would resurrect it.
     assert!(
         !f.seed_dir()
-            .join("buckets/seedle_removed/objects/drop.txt")
+            .join("buckets/graine_removed/objects/drop.txt")
             .exists(),
         "a deleted object left its bytes behind, so a load would put it back"
     );
@@ -352,17 +352,17 @@ fn a_removed_object_disappears_from_the_export() {
 }
 
 #[test]
-fn a_missing_bucket_is_an_error_not_something_seedle_creates() {
+fn a_missing_bucket_is_an_error_not_something_graine_creates() {
     let base = require_pg!();
     let (url, key) = require_storage!();
-    let s = Storage::new(&url, &key, "seedle_create");
-    let f = prepared("bucket_create", &base, &url, &key, "seedle_create");
+    let s = Storage::new(&url, &key, "graine_create");
+    let f = prepared("bucket_create", &base, &url, &key, "graine_create");
     s.put("a.txt", b"a");
 
     f.ok(&["lock", "-q"]);
     f.ok(&["export", "-q"]);
 
-    // Buckets are created by migrations. seedle moves data and must never
+    // Buckets are created by migrations. GraineSQL moves data and must never
     // create one behind the user's back with settings guessed from a seed file.
     s.delete_bucket();
     let r = f.fail(&["load", "--yes"]);
@@ -375,8 +375,8 @@ fn a_missing_bucket_is_an_error_not_something_seedle_creates() {
 fn changed_bucket_settings_are_reported_as_drift() {
     let base = require_pg!();
     let (url, key) = require_storage!();
-    let s = Storage::new(&url, &key, "seedle_settings");
-    let f = prepared("bucket_settings", &base, &url, &key, "seedle_settings");
+    let s = Storage::new(&url, &key, "graine_settings");
+    let f = prepared("bucket_settings", &base, &url, &key, "graine_settings");
     s.put("a.txt", b"hello");
 
     f.ok(&["lock", "-q"]);
@@ -392,8 +392,8 @@ fn changed_bucket_settings_are_reported_as_drift() {
 fn no_buckets_skips_storage_entirely() {
     let base = require_pg!();
     let (url, key) = require_storage!();
-    let s = Storage::new(&url, &key, "seedle_skip");
-    let f = prepared("bucket_skip", &base, &url, &key, "seedle_skip");
+    let s = Storage::new(&url, &key, "graine_skip");
+    let f = prepared("bucket_skip", &base, &url, &key, "graine_skip");
     s.put("a.txt", b"a");
 
     f.ok(&["lock", "-q"]);
@@ -411,15 +411,15 @@ fn no_buckets_skips_storage_entirely() {
 fn an_object_over_the_size_limit_is_refused_with_the_knob_named() {
     let base = require_pg!();
     let (url, key) = require_storage!();
-    let s = Storage::new(&url, &key, "seedle_big");
-    let f = prepared("bucket_big", &base, &url, &key, "seedle_big");
+    let s = Storage::new(&url, &key, "graine_big");
+    let f = prepared("bucket_big", &base, &url, &key, "graine_big");
     s.put("big.bin", &vec![7u8; 4096]);
 
     // Set the cap below the object's size.
-    let cfg = f.path().join("seedle.yaml");
+    let cfg = f.path().join("graine.yaml");
     let text = std::fs::read_to_string(&cfg).unwrap().replace(
-        "  seedle_big: {}",
-        "  seedle_big:\n    max_object_bytes: 1024",
+        "  graine_big: {}",
+        "  graine_big:\n    max_object_bytes: 1024",
     );
     std::fs::write(&cfg, text).unwrap();
 

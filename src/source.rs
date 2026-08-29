@@ -1,6 +1,6 @@
 //! Named connection sources: credential resolution and connecting.
 //!
-//! Credentials never live in `seedle.yaml`. A source names a `.env` file and a
+//! Credentials never live in `graine.yaml`. A source names a `.env` file and a
 //! variable inside it; we read that file directly rather than mutating the
 //! process environment, so two sources can define the same variable name
 //! without stepping on each other.

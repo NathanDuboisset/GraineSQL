@@ -313,7 +313,7 @@ pub async fn fix_mysql_auto_increment(
 pub fn check_writable(src: &crate::source::ResolvedSource) -> Result<()> {
     if src.read_only {
         bail!(
-            "source {:?} is marked `read_only: true` in the config, so seedle will not write to \
+            "source {:?} is marked `read_only: true` in the config, so GraineSQL will not write to \
              it.\n\
              Pass --source with a writable source, or remove the flag if this really is the \
              target.",
@@ -350,7 +350,7 @@ pub fn confirmation_reasons(
     reasons
 }
 
-/// Render a plan as the `seedle plan` output.
+/// Render a plan as the `graine plan` output.
 /// Draw the plan as a dependency tree, roots first.
 ///
 /// The flat plan says what order tables load in; this says why. A table appears

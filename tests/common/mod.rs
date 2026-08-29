@@ -1,7 +1,7 @@
 //! Shared harness for the integration tests.
 //!
 //! Every test needs a real database; there is no useful way to fake schema
-//! introspection. Set `SEEDLE_TEST_PG` to a Postgres URL with rights to create
+//! introspection. Set `GRAINE_TEST_PG` to a Postgres URL with rights to create
 //! databases. Without it the integration tests skip rather than fail, so
 //! `cargo test` still works on a machine with no server.
 
@@ -12,7 +12,7 @@ use std::process::Command;
 
 /// Base URL for the test server, or `None` to skip.
 pub fn pg_base_url() -> Option<String> {
-    std::env::var("SEEDLE_TEST_PG")
+    std::env::var("GRAINE_TEST_PG")
         .ok()
         .filter(|u| !u.trim().is_empty())
 }
@@ -25,7 +25,7 @@ macro_rules! require_pg {
             Some(url) => url,
             None => {
                 eprintln!(
-                    "skipping: set SEEDLE_TEST_PG to a Postgres URL to run the integration tests"
+                    "skipping: set GRAINE_TEST_PG to a Postgres URL to run the integration tests"
                 );
                 return;
             }
@@ -44,8 +44,8 @@ pub struct Fixture {
 impl Fixture {
     /// Create `<name>_src` and `<name>_dst`, both with `schema_sql` applied.
     pub fn new(name: &str, base_url: &str, schema_sql: &str) -> Fixture {
-        let src_db = format!("seedle_{name}_src");
-        let dst_db = format!("seedle_{name}_dst");
+        let src_db = format!("graine_{name}_src");
+        let dst_db = format!("graine_{name}_dst");
 
         for db in [&src_db, &dst_db] {
             psql(
@@ -121,7 +121,7 @@ impl Fixture {
         )
         .unwrap();
         std::fs::write(
-            self.path().join("seedle.yaml"),
+            self.path().join("graine.yaml"),
             format!(
                 "version: 1\n\
                  sources:\n  \
@@ -134,13 +134,13 @@ impl Fixture {
         .unwrap();
     }
 
-    /// Run seedle in the fixture directory.
+    /// Run graine in the fixture directory.
     pub fn run(&self, args: &[&str]) -> Run {
-        let out = Command::new(seedle_bin())
+        let out = Command::new(graine_bin())
             .args(args)
             .current_dir(self.path())
             .output()
-            .expect("running seedle");
+            .expect("running graine");
         Run {
             code: out.status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&out.stdout).to_string(),
@@ -149,7 +149,7 @@ impl Fixture {
         }
     }
 
-    /// Run seedle and require success.
+    /// Run graine and require success.
     pub fn ok(&self, args: &[&str]) -> Run {
         let r = self.run(args);
         assert!(
@@ -161,7 +161,7 @@ impl Fixture {
         r
     }
 
-    /// Run seedle and require failure.
+    /// Run graine and require failure.
     pub fn fail(&self, args: &[&str]) -> Run {
         let r = self.run(args);
         assert!(
@@ -207,7 +207,7 @@ impl Run {
     /// Both streams, for assertion messages.
     pub fn all(&self) -> String {
         format!(
-            "$ seedle {}\n[exit {}]\n--- stdout ---\n{}--- stderr ---\n{}",
+            "$ graine {}\n[exit {}]\n--- stdout ---\n{}--- stderr ---\n{}",
             self.args.join(" "),
             self.code,
             self.stdout,
@@ -246,7 +246,7 @@ fn admin_url(base: &str) -> String {
 
 fn psql(url: &str, sql: &str) -> Result<String, String> {
     let out = Command::new("psql")
-        // The same session settings seedle pins on its own connections. Without
+        // The same session settings GraineSQL pins on its own connections. Without
         // these, psql renders a timestamptz in the machine's local zone and an
         // interval in its default style, so assertions on canonical text would
         // pass or fail depending on where the test runs.
@@ -265,8 +265,8 @@ fn psql(url: &str, sql: &str) -> Result<String, String> {
     }
 }
 
-/// Path to the seedle binary under test.
-pub fn seedle_bin() -> PathBuf {
+/// Path to the `graine` binary under test.
+pub fn graine_bin() -> PathBuf {
     // The test executable lives in target/<profile>/deps/, so the binary is two
     // levels up.
     let mut p = std::env::current_exe().expect("test exe path");
@@ -274,7 +274,7 @@ pub fn seedle_bin() -> PathBuf {
     if p.ends_with("deps") {
         p.pop();
     }
-    p.join("seedle")
+    p.join("graine")
 }
 
 /// Recursively compare two directories, returning a description of the first

@@ -5,7 +5,7 @@
 # Release packaging
 /dist
 
-# Credentials: seedle reads these, and none of them belong in git
+# Credentials: GraineSQL reads these, and none of them belong in git
 .env
 .env.*
 !.env.example

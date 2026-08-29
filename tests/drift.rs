@@ -32,7 +32,7 @@ fn snapshot(f: &Fixture) -> std::path::PathBuf {
 fn an_unchanged_schema_reports_no_drift() {
     let base = require_pg!();
     let f = prepared("nodrift", &base);
-    f.ok(&["diff"]).says("schema matches seedle.lock");
+    f.ok(&["diff"]).says("schema matches graine.lock");
     f.ok(&["lock", "--check"]);
 }
 
@@ -306,7 +306,7 @@ fn a_column_reorder_is_not_drift_at_all() {
     f.sql_dst("ALTER TABLE users DROP COLUMN display; ALTER TABLE users ADD COLUMN display text")
         .unwrap();
 
-    f.ok(&["diff"]).says("schema matches seedle.lock");
+    f.ok(&["diff"]).says("schema matches graine.lock");
     f.ok(&["lock", "--check"]);
 }
 
@@ -316,7 +316,7 @@ fn a_constraint_rename_is_not_drift() {
     let f = prepared("rename", &base);
     f.sql_src("ALTER TABLE orders RENAME CONSTRAINT orders_user_id_fkey TO orders_user_fk")
         .unwrap();
-    f.ok(&["diff"]).says("schema matches seedle.lock");
+    f.ok(&["diff"]).says("schema matches graine.lock");
 }
 
 // ---------------------------------------------------------------------------
@@ -438,5 +438,5 @@ fn verify_notices_a_row_count_that_no_longer_matches() {
     let text = std::fs::read_to_string(&path).unwrap();
     let fewer: String = text.lines().skip(1).map(|l| format!("{l}\n")).collect();
     std::fs::write(&path, fewer).unwrap();
-    f.fail(&["verify"]).says("recorded in seedle.lock");
+    f.fail(&["verify"]).says("recorded in graine.lock");
 }

@@ -1,13 +1,13 @@
 //! SQLite and MySQL, exercised the same way Postgres is.
 //!
-//! SQLite needs nothing installed. MySQL runs only when `SEEDLE_TEST_MYSQL`
+//! SQLite needs nothing installed. MySQL runs only when `GRAINE_TEST_MYSQL`
 //! names a server, e.g. `mysql://root:pw@127.0.0.1:3306`.
 
 mod common;
 
 use std::process::Command;
 
-use common::{dirs_differ, seedle_bin};
+use common::{dirs_differ, graine_bin};
 
 // ---------------------------------------------------------------------------
 // SQLite
@@ -57,7 +57,7 @@ impl Sqlite {
         s.sql("src.db", SQLITE_DATA);
 
         std::fs::write(
-            s.dir.path().join("seedle.yaml"),
+            s.dir.path().join("graine.yaml"),
             format!(
                 "version: 1\n\
                  sources:\n  \
@@ -111,11 +111,11 @@ impl Sqlite {
     }
 
     fn run(&self, args: &[&str]) -> std::process::Output {
-        Command::new(seedle_bin())
+        Command::new(graine_bin())
             .args(args)
             .current_dir(self.dir.path())
             .output()
-            .expect("running seedle")
+            .expect("running graine")
     }
 
     fn ok(&self, args: &[&str]) -> String {
@@ -181,7 +181,7 @@ fn add_pulls_in_the_parents_a_table_needs() {
     // Adding `users` alone would produce a config that cannot load.
     let s = Sqlite::new("");
     std::fs::write(
-        s.dir.path().join("seedle.yaml"),
+        s.dir.path().join("graine.yaml"),
         "version: 1\n\
          sources:\n  dev: {engine: sqlite, url: \"sqlite://src.db\", default: true}\n\
          tables: {}\n",
@@ -203,7 +203,7 @@ fn add_pulls_in_the_parents_a_table_needs() {
 fn add_can_skip_the_parents() {
     let s = Sqlite::new("");
     std::fs::write(
-        s.dir.path().join("seedle.yaml"),
+        s.dir.path().join("graine.yaml"),
         "version: 1\n\
          sources:\n  dev: {engine: sqlite, url: \"sqlite://src.db\", default: true}\n\
          tables: {}\n",
@@ -211,7 +211,7 @@ fn add_can_skip_the_parents() {
     .unwrap();
 
     s.ok(&["add", "users", "--no-parents"]);
-    let cfg = std::fs::read_to_string(s.dir.path().join("seedle.yaml")).unwrap();
+    let cfg = std::fs::read_to_string(s.dir.path().join("graine.yaml")).unwrap();
     assert!(cfg.contains("users:"), "{cfg}");
     assert!(!cfg.contains("orgs:"), "{cfg}");
 }
@@ -226,7 +226,7 @@ fn status_reports_whether_the_seed_is_current() {
     assert!(out.contains("schema: matches"), "{out}");
     assert!(out.contains("in sync"), "{out}");
 
-    // A row added behind seedle's back shows as a count mismatch.
+    // A row added behind GraineSQL's back shows as a count mismatch.
     s.sql("src.db", "INSERT INTO orgs (name) VALUES ('Later')");
     let out = s.ok(&["status"]);
     assert!(out.contains("seeded 2, live 3"), "{out}");
@@ -274,13 +274,13 @@ fn sqlite_foreign_keys_are_enforced_during_a_load() {
 
 macro_rules! require_mysql {
     () => {
-        match std::env::var("SEEDLE_TEST_MYSQL")
+        match std::env::var("GRAINE_TEST_MYSQL")
             .ok()
             .filter(|u| !u.trim().is_empty())
         {
             Some(url) => url,
             None => {
-                eprintln!("skipping: set SEEDLE_TEST_MYSQL to run the MySQL tests");
+                eprintln!("skipping: set GRAINE_TEST_MYSQL to run the MySQL tests");
                 return;
             }
         }
@@ -336,8 +336,8 @@ impl Mysql {
         let m = Mysql {
             dir: tempfile::tempdir().expect("scratch dir"),
             base: base.trim_end_matches('/').to_string(),
-            src: format!("seedle_{name}_src"),
-            dst: format!("seedle_{name}_dst"),
+            src: format!("graine_{name}_src"),
+            dst: format!("graine_{name}_dst"),
             rt: tokio::runtime::Runtime::new().expect("tokio runtime"),
         };
         for db in [m.src.clone(), m.dst.clone()] {
@@ -348,7 +348,7 @@ impl Mysql {
         m.sql(&m.src.clone(), MYSQL_DATA);
 
         std::fs::write(
-            m.dir.path().join("seedle.yaml"),
+            m.dir.path().join("graine.yaml"),
             format!(
                 "version: 1\n\
                  sources:\n  \
@@ -410,11 +410,11 @@ impl Mysql {
     }
 
     fn ok(&self, args: &[&str]) -> String {
-        let out = Command::new(seedle_bin())
+        let out = Command::new(graine_bin())
             .args(args)
             .current_dir(self.dir.path())
             .output()
-            .expect("running seedle");
+            .expect("running graine");
         assert!(
             out.status.success(),
             "expected success from {args:?}:\n{}\n{}",

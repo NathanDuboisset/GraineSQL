@@ -32,9 +32,9 @@ jobs:
       mysql:
         image: mysql:8
         env:
-          MYSQL_ROOT_PASSWORD: seedle
+          MYSQL_ROOT_PASSWORD: graine
         options: >-
-          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pseedle"
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pgraine"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 10
@@ -57,8 +57,8 @@ jobs:
       # same variables.
       - name: Test
         env:
-          SEEDLE_TEST_PG: postgres://postgres:postgres@localhost:5432
-          SEEDLE_TEST_MYSQL: mysql://root:seedle@127.0.0.1:3306
+          GRAINE_TEST_PG: postgres://postgres:postgres@localhost:5432
+          GRAINE_TEST_MYSQL: mysql://root:graine@127.0.0.1:3306
         run: cargo test --all-features
 
   storage:
@@ -79,9 +79,9 @@ jobs:
         run: |
           # The CLI's local keys are fixed and public, so reading them here is
           # not a secret leak.
-          echo "SEEDLE_TEST_PG=postgres://postgres:postgres@127.0.0.1:54322" >> "$GITHUB_ENV"
-          echo "SEEDLE_TEST_STORAGE_URL=http://127.0.0.1:54321" >> "$GITHUB_ENV"
-          echo "SEEDLE_TEST_STORAGE_KEY=$(supabase status -o json | jq -r .SERVICE_ROLE_KEY)" >> "$GITHUB_ENV"
+          echo "GRAINE_TEST_PG=postgres://postgres:postgres@127.0.0.1:54322" >> "$GITHUB_ENV"
+          echo "GRAINE_TEST_STORAGE_URL=http://127.0.0.1:54321" >> "$GITHUB_ENV"
+          echo "GRAINE_TEST_STORAGE_KEY=$(supabase status -o json | jq -r .SERVICE_ROLE_KEY)" >> "$GITHUB_ENV"
       - run: cargo test --test buckets
 
   msrv:

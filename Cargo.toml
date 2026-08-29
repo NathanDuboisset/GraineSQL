@@ -1,16 +1,17 @@
 [package]
-name = "seedle"
+name = "grainesql"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
+authors = ["Nathan Duboisset <nathanduboisset@delosintelligence.fr>"]
 description = "Deterministic, git-friendly database seed export and load for Postgres and MySQL"
 # Not an SPDX identifier, so crates.io needs the file itself. PolyForm
 # Noncommercial is source-available, not open source: commercial use needs a
 # separate licence from the copyright holder.
 license-file = "LICENSE"
-repository = "https://github.com/NathanDuboisset/seedle"
-homepage = "https://github.com/NathanDuboisset/seedle"
-documentation = "https://docs.rs/seedle"
+repository = "https://github.com/NathanDuboisset/grainesql"
+homepage = "https://github.com/NathanDuboisset/grainesql"
+documentation = "https://docs.rs/grainesql"
 readme = "README.md"
 keywords = ["database", "postgres", "seed", "fixtures", "supabase"]
 categories = ["command-line-utilities", "database"]
@@ -18,11 +19,14 @@ categories = ["command-line-utilities", "database"]
 exclude = [
     ".github/",
     "dist/",
+    "packaging/",
     "tests/",
+    "TODO.md",
 ]
 
+# The crate is `grainesql`; the command you type is `graine`.
 [[bin]]
-name = "seedle"
+name = "graine"
 path = "src/main.rs"
 
 # Release binaries are what most people install, so optimise them properly.
@@ -32,7 +36,7 @@ codegen-units = 1
 strip = "symbols"
 
 # cargo-binstall finds prebuilt binaries from GitHub Releases instead of
-# compiling, which turns `cargo binstall seedle` into a download.
+# compiling, which turns `cargo binstall grainesql` into a download.
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ target }.{ archive-format }"
 pkg-fmt = "tgz"

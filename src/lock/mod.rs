@@ -1,10 +1,10 @@
-//! `seedle.lock`, the committed snapshot of the schema the seed files were
+//! `graine.lock`, the committed snapshot of the schema the seed files were
 //! written against.
 //!
 //! Three sections, kept deliberately separate so schema drift and data drift are
 //! distinct signals: `order` (the load manifest), `schema` (what every command
 //! checks the live database against), and `files` (content hashes, checked by
-//! `seedle verify`).
+//! `graine verify`).
 
 pub mod drift;
 
@@ -45,7 +45,7 @@ pub struct Lock {
     pub files: IndexMap<TableId, FileEntry>,
     /// Storage bucket *settings*, keyed by bucket id.
     ///
-    /// Schema, not data: buckets are created by migrations. seedle records them
+    /// Schema, not data: buckets are created by migrations. GraineSQL records them
     /// to check the target against and never writes them.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub buckets: IndexMap<String, crate::storage::BucketSettings>,
@@ -54,7 +54,7 @@ pub struct Lock {
     pub bucket_files: IndexMap<String, BucketEntry>,
 }
 
-/// A bucket's recorded contents, for `seedle verify`.
+/// A bucket's recorded contents, for `graine verify`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BucketEntry {
     pub objects: u64,
@@ -121,7 +121,7 @@ impl Lock {
     pub fn read(path: &Path) -> Result<Lock> {
         let text = std::fs::read_to_string(path).with_context(|| {
             format!(
-                "reading lock file {} (run `seedle lock` to create it)",
+                "reading lock file {} (run `graine lock` to create it)",
                 path.display()
             )
         })?;
@@ -130,7 +130,7 @@ impl Lock {
         if lock.version != LOCK_VERSION {
             bail!(
                 "lock file {} is version {} but this build writes version {LOCK_VERSION}; \
-                 re-run `seedle lock`",
+                 re-run `graine lock`",
                 path.display(),
                 lock.version
             );
@@ -458,7 +458,7 @@ mod tests {
         // like the one the lock was taken from, which on MySQL is every one.
         let mut a = schema(vec![table("users")]);
         let mut b = a.clone();
-        b.rebase("public", "seedle_dst");
+        b.rebase("public", "graine_dst");
 
         assert_eq!(fingerprint_schema(&a), fingerprint_schema(&b));
 

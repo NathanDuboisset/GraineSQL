@@ -77,10 +77,10 @@ pub async fn cmd_init(cli: &Cli, url: Option<String>, force: bool) -> Result<()>
     crate::io::write_atomic(&path, content.as_bytes())?;
     println!("wrote {}", path.display());
     if tables.is_empty() {
-        println!("Add your tables under `tables:`, then run `seedle lock`.");
+        println!("Add your tables under `tables:`, then run `graine lock`.");
     } else {
         println!(
-            "Listed {} table{}. Trim the list, then run `seedle lock`.",
+            "Listed {} table{}. Trim the list, then run `graine lock`.",
             tables.len(),
             if tables.len() == 1 { "" } else { "s" }
         );
@@ -186,7 +186,7 @@ pub async fn cmd_add(ctx: &Ctx, wanted: Vec<String>, no_parents: bool) -> Result
             if pulled.len() == 1 { "" } else { "s" }
         ));
     }
-    ctx.say("run `seedle lock` to record the schema");
+    ctx.say("run `graine lock` to record the schema");
     Ok(())
 }
 
@@ -245,7 +245,7 @@ pub async fn cmd_status(ctx: &Ctx) -> Result<()> {
 
     match &lock {
         None => ctx.say(format!(
-            "no lock at {}; run `seedle lock`",
+            "no lock at {}; run `graine lock`",
             lock_path.display()
         )),
         Some(l) => ctx.say(format!("lock {} ({})", l.fingerprint, lock_path.display())),
@@ -281,5 +281,5 @@ pub async fn cmd_status(ctx: &Ctx) -> Result<()> {
 /// Print a completion script for `shell`.
 pub fn cmd_completions(shell: clap_complete::Shell) {
     use clap::CommandFactory;
-    clap_complete::generate(shell, &mut Cli::command(), "seedle", &mut std::io::stdout());
+    clap_complete::generate(shell, &mut Cli::command(), "graine", &mut std::io::stdout());
 }

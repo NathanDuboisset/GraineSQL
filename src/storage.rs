@@ -3,7 +3,7 @@
 //! Object bytes live in the storage service, not the database, so this talks to
 //! the Storage REST API. Per bucket, `manifest.jsonl` holds one line per object
 //! and `objects/<key>` holds the bytes. The lock records one hash over the
-//! manifest, so `seedle verify` re-checks every byte offline.
+//! manifest, so `graine verify` re-checks every byte offline.
 //!
 //! Bucket settings are schema, created by migrations. They are recorded in the
 //! lock to check against, never written and never applied.
@@ -397,7 +397,7 @@ impl StorageClient {
         Ok(())
     }
 
-    /// Cheap reachability probe, for `seedle sources`.
+    /// Cheap reachability probe, for `graine sources`.
     pub async fn ping(&self) -> Result<usize> {
         let resp = self
             .get("/bucket")

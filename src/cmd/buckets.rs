@@ -137,7 +137,7 @@ pub async fn load_buckets(
         let dir = out_dir.join("buckets").join(name);
         if !dir.is_dir() {
             bail!(
-                "bucket {name:?} has no exported files at {} (run `seedle export` first)",
+                "bucket {name:?} has no exported files at {} (run `graine export` first)",
                 dir.display()
             );
         }
@@ -171,7 +171,7 @@ pub async fn load_buckets(
             continue;
         }
 
-        // Buckets are created by migrations. seedle moves data and never
+        // Buckets are created by migrations. GraineSQL moves data and never
         // touches schema, so a missing bucket is an error rather than something
         // to silently create with settings it guessed from a seed file.
         client.bucket(name).await.with_context(|| {

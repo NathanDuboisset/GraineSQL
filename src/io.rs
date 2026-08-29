@@ -17,7 +17,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let file_name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "seedle".to_string());
+        .unwrap_or_else(|| "graine".to_string());
     let tmp = dir.join(format!(".{file_name}.tmp"));
 
     {
@@ -214,7 +214,7 @@ mod tests {
         write_atomic(&keep, b"x\n").unwrap();
         write_atomic(&dir.path().join("orphan.jsonl"), b"x\n").unwrap();
         // Not a format we emit, so not ours to delete.
-        write_atomic(&dir.path().join("seedle.lock"), b"x\n").unwrap();
+        write_atomic(&dir.path().join("graine.lock"), b"x\n").unwrap();
         write_atomic(&dir.path().join("README.md"), b"x\n").unwrap();
 
         let removed = prune_stale(dir.path(), std::slice::from_ref(&keep)).unwrap();
@@ -222,7 +222,7 @@ mod tests {
         assert!(removed[0].ends_with("orphan.jsonl"));
         assert!(keep.exists());
         assert!(
-            dir.path().join("seedle.lock").exists(),
+            dir.path().join("graine.lock").exists(),
             "the lock must survive"
         );
         assert!(

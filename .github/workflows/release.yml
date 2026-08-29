@@ -61,9 +61,11 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           [ -n "${{ inputs.tag }}" ] && VERSION="${{ inputs.tag }}" && VERSION="${VERSION#v}"
-          NAME="seedle-v${VERSION}-${{ matrix.target }}"
+          # The archive is named after the crate, because that is what
+          # cargo-binstall's `{ name }` expands to; the binary inside is `graine`.
+          NAME="grainesql-v${VERSION}-${{ matrix.target }}"
           mkdir -p "dist/$NAME"
-          cp "target/${{ matrix.target }}/release/seedle" "dist/$NAME/"
+          cp "target/${{ matrix.target }}/release/graine" "dist/$NAME/"
           cp README.md LICENSE "dist/$NAME/"
           tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"
           # A checksum users can verify before running the binary.
@@ -74,9 +76,11 @@ jobs:
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          NAME="seedle-v${VERSION}-${{ matrix.target }}"
+          # Honour the workflow_dispatch override, same as the unix step.
+          [ -n "${{ inputs.tag }}" ] && VERSION="${{ inputs.tag }}" && VERSION="${VERSION#v}"
+          NAME="grainesql-v${VERSION}-${{ matrix.target }}"
           mkdir -p "dist/$NAME"
-          cp "target/${{ matrix.target }}/release/seedle.exe" "dist/$NAME/"
+          cp "target/${{ matrix.target }}/release/graine.exe" "dist/$NAME/"
           cp README.md LICENSE "dist/$NAME/"
           (cd dist && 7z a "$NAME.zip" "$NAME" > /dev/null)
           (cd dist && certutil -hashfile "$NAME.zip" SHA256 | sed -n 2p > "$NAME.zip.sha256")
@@ -113,6 +117,9 @@ jobs:
     name: publish to crates.io
     needs: build
     runs-on: ubuntu-latest
+    # Only a real tag publishes. A workflow_dispatch re-run rebuilds the
+    # binaries but must not try to publish a version crates.io already has.
+    if: startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -135,7 +142,7 @@ jobs:
       - name: Render the formula
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          sha() { cut -d' ' -f1 < "dist/seedle-v${VERSION}-$1.tar.gz.sha256"; }
+          sha() { cut -d' ' -f1 < "dist/grainesql-v${VERSION}-$1.tar.gz.sha256"; }
           mkdir -p out
           sed \
             -e "s|@VERSION@|${VERSION}|g" \
@@ -143,8 +150,8 @@ jobs:
             -e "s|@SHA_MAC_X86@|$(sha x86_64-apple-darwin)|g" \
             -e "s|@SHA_LINUX_ARM@|$(sha aarch64-unknown-linux-gnu)|g" \
             -e "s|@SHA_LINUX_X86@|$(sha x86_64-unknown-linux-gnu)|g" \
-            packaging/homebrew/seedle.rb.tmpl > out/seedle.rb
-          cat out/seedle.rb
+            packaging/homebrew/grainesql.rb.tmpl > out/grainesql.rb
+          cat out/grainesql.rb
 
       - name: Push to the tap
         env:
@@ -157,10 +164,10 @@ jobs:
           fi
           git clone "https://x-access-token:${TAP_TOKEN}@github.com/NathanDuboisset/homebrew-tap.git" tap
           mkdir -p tap/Formula
-          cp out/seedle.rb tap/Formula/seedle.rb
+          cp out/grainesql.rb tap/Formula/grainesql.rb
           cd tap
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/seedle.rb
-          git commit -m "seedle ${GITHUB_REF_NAME#v}" || exit 0
+          git add Formula/grainesql.rb
+          git commit -m "GraineSQL ${GITHUB_REF_NAME#v}" || exit 0
           git push

@@ -22,7 +22,7 @@ pub trait Dialect: Send + Sync {
     /// Session settings applied on connect to make text output deterministic.
     fn session_setup(&self) -> &'static [&'static str];
 
-    /// Query returning the server version, for `seedle sources`.
+    /// Query returning the server version, for `graine sources`.
     fn version_query(&self) -> &'static str {
         "SELECT version()"
     }
@@ -240,7 +240,7 @@ impl Dialect for Postgres {
     }
 
     fn copy_in_statement(&self, table: &Table, columns: &[&Column]) -> Option<String> {
-        // COPY's CSV dialect is the one seedle already writes: an unquoted
+        // COPY's CSV dialect is the one GraineSQL already writes: an unquoted
         // empty field is NULL and a quoted one is the empty string.
         Some(format!(
             "COPY {} ({}) FROM STDIN WITH (FORMAT csv)",

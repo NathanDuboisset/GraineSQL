@@ -39,7 +39,7 @@ impl Severity {
 pub enum Target {
     Table(TableId),
     Column(TableId, String),
-    /// A storage bucket. Buckets are created by migrations, so seedle only ever
+    /// A storage bucket. Buckets are created by migrations, so GraineSQL only ever
     /// checks them, it never creates or reconfigures one.
     Bucket(String),
 }
@@ -144,7 +144,7 @@ impl Report {
     /// Human-readable report, aligned into columns.
     pub fn render(&self) -> String {
         if self.is_empty() {
-            return "schema matches seedle.lock\n".to_string();
+            return "schema matches graine.lock\n".to_string();
         }
         let mut out = String::new();
         let width = self
@@ -182,7 +182,7 @@ impl Report {
         out.push_str(&format!(
             "\n{breaking} breaking, {confirm} needing confirmation, {benign} benign.{}\n",
             if breaking > 0 {
-                " Review, then re-run `seedle lock` to accept."
+                " Review, then re-run `graine lock` to accept."
             } else {
                 ""
             }
@@ -497,7 +497,7 @@ fn enum_owner(schema: &Schema, name: &str) -> TableId {
 
 /// Compare locked bucket settings against the live ones.
 ///
-/// Buckets are created and configured by migrations, so seedle never writes
+/// Buckets are created and configured by migrations, so GraineSQL never writes
 /// these, it only reports when they no longer match what the seed files were
 /// exported against. The question each rule answers is the same as for tables:
 /// would this make the existing objects fail to load?
@@ -676,7 +676,7 @@ mod tests {
         let r = classify(&base(), &base());
         assert!(r.is_empty());
         assert!(!r.has_breaking());
-        assert_eq!(r.render(), "schema matches seedle.lock\n");
+        assert_eq!(r.render(), "schema matches graine.lock\n");
     }
 
     // -- breaking -----------------------------------------------------------
@@ -1000,7 +1000,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("seedle lock"),
+            text.contains("graine lock"),
             "the fix must be named:\n{text}"
         );
     }

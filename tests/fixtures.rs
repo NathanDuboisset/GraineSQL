@@ -5,7 +5,7 @@
 //! fixture:
 //!
 //! - **anchor**: build a database from `data.sql`, export, and compare to the
-//!   committed files, tying them to a source seedle never wrote;
+//!   committed files, tying them to a source GraineSQL never wrote;
 //! - **replay**: for each declared engine, load the committed files and export
 //!   them again, which must be byte-identical.
 //!
@@ -21,7 +21,7 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use common::seedle_bin;
+use common::graine_bin;
 
 /// Fixture name and the engines whose schema it ships.
 const FIXTURES: &[(&str, &[Engine])] = &[
@@ -54,8 +54,8 @@ impl Engine {
     /// Base URL for this engine, or `None` when it is not configured.
     fn base_url(self) -> Option<String> {
         let var = match self {
-            Engine::Postgres => "SEEDLE_TEST_PG",
-            Engine::Mysql => "SEEDLE_TEST_MYSQL",
+            Engine::Postgres => "GRAINE_TEST_PG",
+            Engine::Mysql => "GRAINE_TEST_MYSQL",
             // SQLite is a file, so it needs nothing configured.
             Engine::Sqlite => return Some(String::new()),
         };
@@ -84,7 +84,7 @@ impl Run {
 
         // Copy the config and the committed seed files; the schema and data
         // stay where they are.
-        std::fs::copy(src.join("seedle.yaml"), dir.path().join("seedle.yaml")).unwrap();
+        std::fs::copy(src.join("graine.yaml"), dir.path().join("graine.yaml")).unwrap();
         let seed = src.join("seed");
         if seed.is_dir() {
             copy_dir(&seed, &dir.path().join("seed"));
@@ -115,7 +115,7 @@ impl Run {
 
     /// Create a scratch database and apply the fixture's schema.
     fn create_database(&mut self, base: &str) {
-        let name = format!("seedle_fx_{}_{}", self.fixture, self.engine.name());
+        let name = format!("graine_fx_{}_{}", self.fixture, self.engine.name());
         match self.engine {
             Engine::Sqlite => {
                 let path = self.dir.path().join("db.sqlite");
@@ -181,17 +181,17 @@ impl Run {
         })
     }
 
-    /// Run seedle with this engine selected and its URL in the environment.
+    /// Run graine with this engine selected and its URL in the environment.
     fn run(&self, args: &[&str]) -> std::process::Output {
-        Command::new(seedle_bin())
+        Command::new(graine_bin())
             .args(args)
             .args(["--source", self.engine.name()])
             .current_dir(self.dir.path())
-            .env("SEEDLE_FIXTURE_PG", url_for(self, Engine::Postgres))
-            .env("SEEDLE_FIXTURE_MYSQL", url_for(self, Engine::Mysql))
-            .env("SEEDLE_FIXTURE_SQLITE", url_for(self, Engine::Sqlite))
+            .env("GRAINE_FIXTURE_PG", url_for(self, Engine::Postgres))
+            .env("GRAINE_FIXTURE_MYSQL", url_for(self, Engine::Mysql))
+            .env("GRAINE_FIXTURE_SQLITE", url_for(self, Engine::Sqlite))
             .output()
-            .expect("running seedle")
+            .expect("running graine")
     }
 
     fn ok(&self, args: &[&str]) -> String {
@@ -214,7 +214,7 @@ impl Drop for Run {
         // drops it first. Panicking here would abort the test process.
         if let Some((_, admin)) = &self.database {
             if !admin.is_empty() {
-                let name = format!("seedle_fx_{}_{}", self.fixture, self.engine.name());
+                let name = format!("graine_fx_{}_{}", self.fixture, self.engine.name());
                 let _ = self.exec(admin, &format!("DROP DATABASE IF EXISTS {name}"));
             }
         }
@@ -300,7 +300,7 @@ fn seed_files_differ(a: &Path, b: &Path) -> Option<String> {
                 let p = e.path();
                 if p.is_dir() {
                     stack.push(p);
-                } else if p.file_name().and_then(|n| n.to_str()) != Some("seedle.lock") {
+                } else if p.file_name().and_then(|n| n.to_str()) != Some("graine.lock") {
                     let rel = p.strip_prefix(root).unwrap().to_string_lossy().to_string();
                     out.push((rel, std::fs::read(&p).unwrap_or_default()));
                 }
@@ -341,7 +341,7 @@ fn regenerate(fixture: &str, engine: Engine, base: &str) {
     copy_dir(&run.dir.path().join("seed"), &target);
     // The lock is engine-specific and regenerated per run, so it is not part of
     // the fixture.
-    let _ = std::fs::remove_file(target.join("seedle.lock"));
+    let _ = std::fs::remove_file(target.join("graine.lock"));
     eprintln!("regenerated {fixture} from {}", engine.name());
 }
 
@@ -356,7 +356,7 @@ fn every_fixture_round_trips_on_every_engine_it_declares() {
             if let Some(base) = Engine::Postgres.base_url() {
                 regenerate(fixture, Engine::Postgres, &base);
             } else {
-                eprintln!("skipping regeneration: SEEDLE_TEST_PG is not set");
+                eprintln!("skipping regeneration: GRAINE_TEST_PG is not set");
             }
         }
 
@@ -368,7 +368,7 @@ fn every_fixture_round_trips_on_every_engine_it_declares() {
         // Anchor the fixture. Loading the seed files and exporting them again
         // only proves the two halves agree with each other, so it would pass
         // just as happily on a file someone had edited. Building the database
-        // from `data.sql` instead ties the committed files to a source seedle
+        // from `data.sql` instead ties the committed files to a source GraineSQL
         // never wrote.
         if let Some(base) = Engine::Postgres.base_url() {
             let run = Run::new(fixture, Engine::Postgres, &base);
@@ -414,7 +414,7 @@ fn every_fixture_round_trips_on_every_engine_it_declares() {
     }
 
     assert!(
-        ran > 0 || std::env::var("SEEDLE_TEST_PG").is_err(),
+        ran > 0 || std::env::var("GRAINE_TEST_PG").is_err(),
         "no fixture ran despite a configured database"
     );
 }

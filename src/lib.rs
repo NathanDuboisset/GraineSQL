@@ -1,4 +1,4 @@
-//! seedle, deterministic, git-friendly database seed export and load.
+//! GraineSQL, deterministic, git-friendly database seed export and load.
 
 pub mod cli;
 pub mod cmd;

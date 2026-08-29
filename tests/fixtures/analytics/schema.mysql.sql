@@ -1,5 +1,5 @@
 -- Numeric and temporal extremes. Postgres and MySQL only: SQLite has no exact
--- decimal, so trailing zeros would be lost before seedle saw the value.
+-- decimal, so trailing zeros would be lost before GraineSQL saw the value.
 CREATE TABLE accounts (
     id   INT PRIMARY KEY,
     plan ENUM('free','pro','team') NOT NULL

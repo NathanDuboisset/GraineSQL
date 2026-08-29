@@ -191,7 +191,7 @@ pub fn read_csv(path: &Path, columns: &[&Column]) -> Result<Vec<Vec<Value>>> {
         if !columns.iter().any(|c| c.name == *h) {
             bail!(
                 "{name}:1: column {h:?} is in the seed file but not in the table; \
-                 re-export after a schema change, or run `seedle lock`"
+                 re-export after a schema change, or run `graine lock`"
             );
         }
     }

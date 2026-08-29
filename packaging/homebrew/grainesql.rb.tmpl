@@ -1,0 +1,43 @@
+# Rendered by .github/workflows/release.yml on every tag; do not edit the copy
+# in the tap by hand.
+class Grainesql < Formula
+  desc "Deterministic, git-friendly database seed export and load"
+  homepage "https://github.com/NathanDuboisset/grainesql"
+  version "@VERSION@"
+  # PolyForm Noncommercial 1.0.0, source-available, not an SPDX identifier,
+  # so it is declared as :cannot_represent rather than mislabelled.
+  license :cannot_represent
+
+  BASE = "https://github.com/NathanDuboisset/grainesql/releases/download/v@VERSION@".freeze
+
+  on_macos do
+    if Hardware::CPU.arm?
+      url "#{BASE}/grainesql-v@VERSION@-aarch64-apple-darwin.tar.gz"
+      sha256 "@SHA_MAC_ARM@"
+    else
+      url "#{BASE}/grainesql-v@VERSION@-x86_64-apple-darwin.tar.gz"
+      sha256 "@SHA_MAC_X86@"
+    end
+  end
+
+  on_linux do
+    if Hardware::CPU.arm?
+      url "#{BASE}/grainesql-v@VERSION@-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "@SHA_LINUX_ARM@"
+    else
+      url "#{BASE}/grainesql-v@VERSION@-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "@SHA_LINUX_X86@"
+    end
+  end
+
+  def install
+    bin.install "graine"
+  end
+
+  # Deliberately does not assert on any error message: a formula that pins the
+  # wording of a validation error breaks on a harmless message edit.
+  test do
+    assert_match "graine #{version}", shell_output("#{bin}/graine --version")
+    assert_match "_graine", shell_output("#{bin}/graine completions zsh")
+  end
+end

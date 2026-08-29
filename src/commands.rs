@@ -203,13 +203,13 @@ pub fn gate_on_drift_with_buckets(
 
     if report.has_breaking() && !force {
         bail!(
-            "schema drift vs seedle.lock\n{}\nNothing was changed. Review, then run \
-             `seedle lock` to accept, or --force to proceed anyway.",
+            "schema drift vs graine.lock\n{}\nNothing was changed. Review, then run \
+             `graine lock` to accept, or --force to proceed anyway.",
             report.render()
         );
     }
 
-    ctx.warn(format!("schema drift vs seedle.lock\n{}", report.render()));
+    ctx.warn(format!("schema drift vs graine.lock\n{}", report.render()));
 
     if report.has_breaking() {
         ctx.warn("proceeding past breaking drift because --force was given");
@@ -373,7 +373,7 @@ pub async fn cmd_lock(ctx: &Ctx, check: bool) -> Result<()> {
         }
         if !report.is_empty() {
             bail!(
-                "seedle.lock is out of date with source {:?}; run `seedle lock` to update it",
+                "graine.lock is out of date with source {:?}; run `graine lock` to update it",
                 db.source_name
             );
         }
@@ -1044,7 +1044,7 @@ pub fn cmd_verify(ctx: &Ctx) -> Result<()> {
 
     for cfg in &selected {
         let Some(id) = schema.resolve(&cfg.id) else {
-            problems.push(format!("{}: not in seedle.lock", cfg.id));
+            problems.push(format!("{}: not in graine.lock", cfg.id));
             continue;
         };
         let Some(entry) = lock
@@ -1052,7 +1052,7 @@ pub fn cmd_verify(ctx: &Ctx) -> Result<()> {
             .get(&crate::lock::relative(&id, &schema.default_schema))
         else {
             problems.push(format!(
-                "{id}: no file recorded in seedle.lock (run `seedle export`)"
+                "{id}: no file recorded in graine.lock (run `graine export`)"
             ));
             continue;
         };
@@ -1072,7 +1072,7 @@ pub fn cmd_verify(ctx: &Ctx) -> Result<()> {
             Ok(rows) => {
                 if rows.len() as u64 != entry.rows {
                     problems.push(format!(
-                        "{id}: {} rows on disk, {} recorded in seedle.lock",
+                        "{id}: {} rows on disk, {} recorded in graine.lock",
                         rows.len(),
                         entry.rows
                     ));
@@ -1096,7 +1096,7 @@ pub fn cmd_verify(ctx: &Ctx) -> Result<()> {
                 match export.hash() {
                     Ok(h) if h == entry.sha256 => {}
                     Ok(h) => problems.push(format!(
-                        "bucket {name}: manifest hash {h} does not match seedle.lock ({})",
+                        "bucket {name}: manifest hash {h} does not match graine.lock ({})",
                         entry.sha256
                     )),
                     Err(e) => problems.push(format!("bucket {name}: {e:#}")),
@@ -1142,7 +1142,7 @@ pub fn cmd_verify(ctx: &Ctx) -> Result<()> {
 
     if !problems.is_empty() {
         bail!(
-            "seed files do not match seedle.lock:\n{}",
+            "seed files do not match graine.lock:\n{}",
             problems
                 .iter()
                 .map(|p| format!("  {p}"))

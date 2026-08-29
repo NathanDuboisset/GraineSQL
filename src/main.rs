@@ -1,8 +1,8 @@
 use anyhow::Result;
 use clap::Parser;
 
-use seedle::cli::Cli;
-use seedle::commands;
+use grainesql::cli::Cli;
+use grainesql::commands;
 
 #[tokio::main]
 async fn main() {
@@ -25,9 +25,9 @@ fn init_tracing(verbose: bool, quiet: bool) {
     let default = if quiet {
         "error"
     } else if verbose {
-        "seedle=debug,sqlx=warn"
+        "grainesql=debug,sqlx=warn"
     } else {
-        "seedle=info,sqlx=error"
+        "grainesql=info,sqlx=error"
     };
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default));

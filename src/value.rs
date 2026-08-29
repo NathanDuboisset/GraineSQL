@@ -369,7 +369,7 @@ fn format_time(t: NaiveTime) -> String {
     }
 }
 
-/// Lowercase hex, the form seedle writes.
+/// Lowercase hex, the form GraineSQL writes.
 pub fn hex_encode(bytes: &[u8]) -> String {
     hex(bytes, false)
 }

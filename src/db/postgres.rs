@@ -234,7 +234,7 @@ fn enum_name(class: &TypeClass) -> Option<String> {
     }
 }
 
-/// Every user table, for `seedle init`.
+/// Every user table, for `graine init`.
 pub async fn list_tables(db: &Db) -> Result<Vec<TableId>> {
     let sql = format!(
         "SELECT n.nspname, c.relname

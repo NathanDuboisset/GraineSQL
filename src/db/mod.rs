@@ -94,7 +94,7 @@ pub async fn introspect(db: &Db) -> Result<Schema> {
     }
 }
 
-/// Every user table, for `seedle init` and `seedle add`.
+/// Every user table, for `graine init` and `graine add`.
 pub async fn list_tables(db: &Db) -> Result<Vec<TableId>> {
     match db.engine().dialect() {
         Engine::Mysql => mysql::list_tables(db).await,
@@ -158,7 +158,7 @@ impl Missing {
             }
         }
         out.push_str(&format!(
-            "The database has {} table{} in total; run `seedle init --url ...` to list them.",
+            "The database has {} table{} in total; run `graine init --url ...` to list them.",
             self.found.len(),
             if self.found.len() == 1 { "" } else { "s" }
         ));
@@ -179,7 +179,7 @@ impl Missing {
 }
 
 /// Narrow a schema to `wanted` plus every table reachable from it by foreign
-/// key, so the lock stays scoped to what seedle actually touches while still
+/// key, so the lock stays scoped to what GraineSQL actually touches while still
 /// describing the tables that constrain load order.
 ///
 /// Tables the database does not have are reported rather than raised: when a
@@ -353,7 +353,7 @@ impl Db {
         self.dialect.engine()
     }
 
-    /// Round-trip check, used by `seedle sources`.
+    /// Round-trip check, used by `graine sources`.
     pub async fn ping(&self) -> Result<String> {
         let rows = self.query_text(self.dialect.version_query()).await?;
         Ok(rows

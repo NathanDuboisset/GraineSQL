@@ -90,11 +90,13 @@ fn encode_value(
                 // payloads gain nothing from nesting anyway, they stay quoted,
                 // which keeps every case decodable.
                 if parsed.is_object() || parsed.is_array() {
-                    // jsonb has already normalised key order server-side;
-                    // sorting makes that explicit and makes plain `json`
-                    // deterministic too.
-                    let sort_keys = matches!(col.class, TypeClass::Json { binary: true });
-                    write_json(out, &parsed, pretty, depth, sort_keys);
+                    // Always sorted, never conditional on `binary`. jsonb is
+                    // key-normalised server-side and plain json is not, so
+                    // keying the decision off the column class would make the
+                    // same document encode differently depending on which
+                    // engine held it, and a Postgres `json` column loaded into
+                    // a MySQL `JSON` one would re-export with reordered keys.
+                    write_json(out, &parsed, pretty, depth, true);
                 } else {
                     encode_string(out, raw);
                 }
@@ -246,7 +248,7 @@ pub fn decode_row(columns: &[&Column], line: &str, where_: &str) -> Result<Vec<V
         if !columns.iter().any(|c| c.name == *key) {
             bail!(
                 "{where_}: column {key:?} is in the seed file but not in the table; \
-                 re-export after a schema change, or run `seedle lock`"
+                 re-export after a schema change, or run `graine lock`"
             );
         }
     }
@@ -744,20 +746,21 @@ mod tests {
     }
 
     #[test]
-    fn plain_json_preserves_key_order_while_jsonb_sorts() {
+    fn key_order_is_canonical_whatever_the_column_class() {
         let binary = vec![col("j", TypeClass::Json { binary: true })];
         let plain = vec![col("j", TypeClass::Json { binary: false })];
         let row = vec![Value::Json(r#"{"z":1,"a":2}"#.into())];
 
+        // Both sort. Key order must not depend on which engine held the
+        // column, or the same document re-exports differently after a
+        // cross-engine load.
         assert_eq!(
             encode(&binary, &row, JsonMode::Unroll, false),
-            r#"{"j":{"a":2,"z":1}}"#,
-            "jsonb is key-normalised by the server, so we sort to match"
+            r#"{"j":{"a":2,"z":1}}"#
         );
         assert_eq!(
             encode(&plain, &row, JsonMode::Unroll, false),
-            r#"{"j":{"z":1,"a":2}}"#,
-            "plain json stores the document verbatim, so key order is data"
+            r#"{"j":{"a":2,"z":1}}"#
         );
     }
 

@@ -302,7 +302,7 @@ impl Table {
         self.columns.iter().find(|c| c.name == name)
     }
 
-    /// Columns seedle is allowed to write. Generated columns are never writable.
+    /// Columns GraineSQL is allowed to write. Generated columns are never writable.
     pub fn writable_columns(&self) -> impl Iterator<Item = &Column> {
         self.columns.iter().filter(|c| !c.generated)
     }

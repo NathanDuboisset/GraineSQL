@@ -731,6 +731,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "grainesql"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "chrono",
+ "clap",
+ "clap_complete",
+ "csv",
+ "dotenvy",
+ "flate2",
+ "futures-util",
+ "indexmap",
+ "reqwest",
+ "rust_decimal",
+ "ryu",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "sha2",
+ "sqlx",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1771,36 +1801,6 @@ name = "seahash"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c107b6f4780854c8b126e228ea8869f4d7b71260f962fefb57b996b8959ba6b"
-
-[[package]]
-name = "seedle"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blake3",
- "chrono",
- "clap",
- "clap_complete",
- "csv",
- "dotenvy",
- "flate2",
- "futures-util",
- "indexmap",
- "reqwest",
- "rust_decimal",
- "ryu",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "sha2",
- "sqlx",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
 
 [[package]]
 name = "serde"
