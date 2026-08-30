@@ -198,6 +198,13 @@ impl TypeClass {
             // Everything renders to text, so text is the universal widening target.
             (_, Text { max_len: None }) => true,
 
+            // MySQL has no uuid type; `CHAR(36)` is the stand-in, and a
+            // canonical uuid is always exactly 36 characters.
+            (Uuid, Text { max_len: Some(n) }) => *n >= 36,
+
+            // jsonb vs json is storage, not fidelity: same text either way.
+            (Json { .. }, Json { .. }) => true,
+
             (Date, Timestamp { .. }) => true,
             (Timestamp { tz: false }, Timestamp { tz: true }) => true,
 
@@ -468,6 +475,26 @@ mod tests {
         ] {
             assert!(c.widens_to(&text), "{} should widen to text", c.label());
         }
+    }
+
+    #[test]
+    fn a_uuid_widens_only_into_text_wide_enough_to_hold_it() {
+        let uuid = TypeClass::Uuid;
+        assert!(uuid.widens_to(&TypeClass::Text { max_len: Some(36) }));
+        assert!(uuid.widens_to(&TypeClass::Text { max_len: Some(64) }));
+        assert!(!uuid.widens_to(&TypeClass::Text { max_len: Some(35) }));
+        // Text is not a uuid: the reverse stays breaking.
+        assert!(!TypeClass::Text { max_len: Some(36) }.widens_to(&uuid));
+    }
+
+    #[test]
+    fn json_widens_in_both_directions_regardless_of_storage() {
+        let jsonb = TypeClass::Json { binary: true };
+        let json = TypeClass::Json { binary: false };
+        assert!(jsonb.widens_to(&json));
+        assert!(json.widens_to(&jsonb));
+        // Still not interchangeable with anything else.
+        assert!(!jsonb.widens_to(&TypeClass::Int { bits: 64 }));
     }
 
     #[test]

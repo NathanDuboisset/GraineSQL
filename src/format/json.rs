@@ -290,8 +290,22 @@ fn decode_value(col: &Column, v: &serde_json::Value) -> Result<Value> {
         _ => {
             let text = match v {
                 serde_json::Value::String(s) => s.clone(),
-                serde_json::Value::Bool(b) => b.to_string(),
-                serde_json::Value::Number(n) => n.to_string(),
+                // SQLite and MySQL have no boolean, so a Postgres `boolean`
+                // idiomatically becomes an integer column on the way across.
+                serde_json::Value::Bool(b) => match col.class {
+                    TypeClass::Int { .. } | TypeClass::Decimal { .. } | TypeClass::Float { .. } => {
+                        if *b { "1" } else { "0" }.to_string()
+                    }
+                    _ => b.to_string(),
+                },
+                serde_json::Value::Number(n) => match col.class {
+                    TypeClass::Bool => match n.as_i64() {
+                        Some(0) => "false".to_string(),
+                        Some(1) => "true".to_string(),
+                        _ => n.to_string(),
+                    },
+                    _ => n.to_string(),
+                },
                 other => bail!(
                     "expected a {} value, found a json {}",
                     col.class.label(),
@@ -913,6 +927,35 @@ mod tests {
         let refs: Vec<&Column> = cols.iter().collect();
         let row = decode_row(&refs, r#"{"id":1}"#, "test").unwrap();
         assert_eq!(row, vec![Value::Int(1), Value::Null]);
+    }
+
+    #[test]
+    fn a_bool_and_an_integer_column_decode_each_other() {
+        // A Postgres `boolean` exported as `true` loading into the SQLite or
+        // MySQL integer column that stands in for it, and back again.
+        let ints = [col("flag", TypeClass::Int { bits: 64 })];
+        let refs: Vec<&Column> = ints.iter().collect();
+        assert_eq!(
+            decode_row(&refs, r#"{"flag":true}"#, "test").unwrap(),
+            vec![Value::Int(1)]
+        );
+        assert_eq!(
+            decode_row(&refs, r#"{"flag":false}"#, "test").unwrap(),
+            vec![Value::Int(0)]
+        );
+
+        let bools = [col("flag", TypeClass::Bool)];
+        let refs: Vec<&Column> = bools.iter().collect();
+        assert_eq!(
+            decode_row(&refs, r#"{"flag":1}"#, "test").unwrap(),
+            vec![Value::Bool(true)]
+        );
+        assert_eq!(
+            decode_row(&refs, r#"{"flag":0}"#, "test").unwrap(),
+            vec![Value::Bool(false)]
+        );
+        // A number that is not 0 or 1 is not a boolean in disguise.
+        assert!(decode_row(&refs, r#"{"flag":7}"#, "test").is_err());
     }
 
     #[test]

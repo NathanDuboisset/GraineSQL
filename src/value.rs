@@ -257,8 +257,26 @@ fn parse_time(s: &str) -> Result<NaiveTime> {
         .with_context(|| format!("expected a time, got {s:?}"))
 }
 
+/// Parse a timestamp with no time zone.
+///
+/// A trailing offset is folded to UTC rather than refused: SQLite and MySQL
+/// have no tz-aware type to receive a Postgres `timestamptz`, so refusing it
+/// fails every cross-engine load of such a column. Sessions are pinned to UTC,
+/// so the instant survives and only the designator goes.
 fn parse_naive_dt(s: &str) -> Result<NaiveDateTime> {
     let t = s.trim();
+    naive_dt_exact(t)
+        .or_else(|| {
+            let (naive, offset) = strip_offset(t);
+            let offset = offset?;
+            let naive = naive_dt_exact(naive)?;
+            let seconds = parse_offset_seconds(offset).ok()?;
+            Some(naive - chrono::Duration::seconds(seconds as i64))
+        })
+        .with_context(|| format!("expected a timestamp, got {s:?}"))
+}
+
+fn naive_dt_exact(t: &str) -> Option<NaiveDateTime> {
     // Accept both the SQL space separator and the ISO `T`.
     NaiveDateTime::parse_from_str(t, "%Y-%m-%d %H:%M:%S%.f")
         .or_else(|_| NaiveDateTime::parse_from_str(t, "%Y-%m-%dT%H:%M:%S%.f"))
@@ -267,7 +285,7 @@ fn parse_naive_dt(s: &str) -> Result<NaiveDateTime> {
                 d.and_time(NaiveTime::from_hms_opt(0, 0, 0).expect("midnight is a valid time"))
             })
         })
-        .with_context(|| format!("expected a timestamp, got {s:?}"))
+        .ok()
 }
 
 fn parse_dt_tz(s: &str) -> Result<DateTime<Utc>> {
@@ -601,6 +619,27 @@ mod tests {
             round_trip(&c, "2024-01-01 12:00:00.25"),
             "2024-01-01T12:00:00.250000"
         );
+    }
+
+    #[test]
+    fn a_tz_aware_value_folds_into_a_naive_column() {
+        // What a Postgres timestamptz export looks like arriving at a SQLite
+        // DATETIME or MySQL DATETIME column, which have no tz-aware type.
+        let c = TypeClass::Timestamp { tz: false };
+        assert_eq!(
+            round_trip(&c, "2024-01-01T12:00:00Z"),
+            "2024-01-01T12:00:00"
+        );
+        assert_eq!(
+            round_trip(&c, "2024-01-01 12:00:00+02"),
+            "2024-01-01T10:00:00"
+        );
+        assert_eq!(
+            round_trip(&c, "2024-01-01 12:00:00-05:30"),
+            "2024-01-01T17:30:00"
+        );
+        // Still rejects what is genuinely not a timestamp.
+        assert!(Value::parse(&c, Some("not a time")).is_err());
     }
 
     #[test]
