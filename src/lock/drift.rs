@@ -11,7 +11,7 @@ use std::fmt;
 
 use indexmap::IndexMap;
 
-use crate::schema::{Column, ForeignKey, Schema, Table, TableId, TypeClass};
+use crate::schema::{Column, ForeignKey, Schema, Table, TableId, TypeClass, UniqueKey};
 use crate::storage::BucketSettings;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -300,13 +300,14 @@ fn compare_table(id: &TableId, locked: &Table, live: &Table, out: &mut Vec<Drift
         });
     }
 
-    let locked_uq: BTreeSet<&Vec<String>> = locked.unique.iter().collect();
-    let live_uq: BTreeSet<&Vec<String>> = live.unique.iter().collect();
+    // Predicate included: changing it leaves a different constraint.
+    let locked_uq: BTreeSet<&UniqueKey> = locked.unique.iter().collect();
+    let live_uq: BTreeSet<&UniqueKey> = live.unique.iter().collect();
     for gone in locked_uq.difference(&live_uq) {
         out.push(Drift {
             severity: Severity::Breaking,
             target: Target::Table(id.clone()),
-            what: format!("unique constraint dropped on {}", fmt_key(gone)),
+            what: format!("unique constraint dropped on {}", gone),
             note: "it may be the conflict target an upsert relies on".into(),
         });
     }
@@ -314,7 +315,7 @@ fn compare_table(id: &TableId, locked: &Table, live: &Table, out: &mut Vec<Drift
         out.push(Drift {
             severity: Severity::Benign,
             target: Target::Table(id.clone()),
-            what: format!("unique constraint added on {}", fmt_key(added)),
+            what: format!("unique constraint added on {}", added),
             note: String::new(),
         });
     }
@@ -637,7 +638,7 @@ mod tests {
                 col("age", TypeClass::Int { bits: 32 }),
             ],
             primary_key: vec!["id".into()],
-            unique: vec![vec!["email".into()]],
+            unique: vec![UniqueKey::total(vec!["email".into()])],
             foreign_keys: vec![],
         };
         let mut tables = IndexMap::new();
@@ -970,7 +971,7 @@ mod tests {
     #[test]
     fn adding_a_unique_constraint_is_benign() {
         let r = drift_from(|s| {
-            users(s).unique.push(vec!["age".into()]);
+            users(s).unique.push(UniqueKey::total(vec!["age".into()]));
         });
         assert_eq!(only(&r).severity, Severity::Benign);
     }

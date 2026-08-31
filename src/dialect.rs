@@ -67,6 +67,23 @@ pub trait Dialect: Send + Sync {
     /// `INSERT` keyword sequence, which MySQL varies to express "skip existing".
     fn insert_verb(&self, mode: LoadMode) -> &'static str;
 
+    /// The `ON CONFLICT` target: the column list, plus the predicate when the
+    /// only matching index is a partial one.
+    fn conflict_target(&self, table: &Table, key: &[String]) -> String {
+        let cols = key
+            .iter()
+            .map(|c| self.quote_ident(c))
+            .collect::<Vec<_>>()
+            .join(", ");
+        match table
+            .conflict_target(key)
+            .and_then(|u| u.predicate.as_ref())
+        {
+            Some(p) => format!("({cols}) WHERE {p}"),
+            None => format!("({cols})"),
+        }
+    }
+
     /// Trailing conflict clause, empty when the mode needs none.
     fn conflict_clause(
         &self,
@@ -278,11 +295,7 @@ impl Dialect for Postgres {
                         table.id
                     );
                 }
-                let target = key
-                    .iter()
-                    .map(|c| self.quote_ident(c))
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let target = self.conflict_target(table, key);
                 let updates: Vec<String> = insert_cols
                     .iter()
                     .filter(|c| !key.contains(c))
@@ -294,10 +307,10 @@ impl Dialect for Postgres {
                 if updates.is_empty() {
                     // A key-only table has nothing to update; upsert degenerates
                     // to "ensure present".
-                    Ok(format!(" ON CONFLICT ({target}) DO NOTHING"))
+                    Ok(format!(" ON CONFLICT {target} DO NOTHING"))
                 } else {
                     Ok(format!(
-                        " ON CONFLICT ({target}) DO UPDATE SET {}",
+                        " ON CONFLICT {target} DO UPDATE SET {}",
                         updates.join(", ")
                     ))
                 }
@@ -612,11 +625,7 @@ impl Dialect for Sqlite {
                         table.id
                     );
                 }
-                let target = key
-                    .iter()
-                    .map(|c| self.quote_ident(c))
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let target = self.conflict_target(table, key);
                 let updates: Vec<String> = insert_cols
                     .iter()
                     .filter(|c| !key.contains(c))
@@ -626,10 +635,10 @@ impl Dialect for Sqlite {
                     })
                     .collect();
                 if updates.is_empty() {
-                    return Ok(format!(" ON CONFLICT ({target}) DO NOTHING"));
+                    return Ok(format!(" ON CONFLICT {target} DO NOTHING"));
                 }
                 Ok(format!(
-                    " ON CONFLICT ({target}) DO UPDATE SET {}",
+                    " ON CONFLICT {target} DO UPDATE SET {}",
                     updates.join(", ")
                 ))
             }

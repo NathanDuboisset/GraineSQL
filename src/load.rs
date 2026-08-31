@@ -55,7 +55,7 @@ pub fn upsert_key(table: &Table, cfg: &ResolvedTable) -> Result<Vec<String>> {
         // A conflict target must be backed by a unique constraint, or the
         // database rejects the statement with a message that does not explain
         // why. Say so here instead.
-        let is_unique = table.primary_key == *key || table.unique.iter().any(|u| u == key);
+        let is_unique = table.primary_key == *key || table.conflict_target(key).is_some();
         if !is_unique {
             bail!(
                 "table {}: `key: [{}]` is not backed by a primary key or unique constraint, so \
@@ -74,7 +74,7 @@ pub fn upsert_key(table: &Table, cfg: &ResolvedTable) -> Result<Vec<String>> {
                     table
                         .unique
                         .iter()
-                        .map(|u| format!("({})", u.join(", ")))
+                        .map(|u| u.to_string())
                         .collect::<Vec<_>>()
                         .join(", ")
                 }
@@ -159,8 +159,14 @@ pub fn validate_rows(
     // A duplicate key inside one file cannot be resolved by any mode: under
     // insert it aborts, and under upsert the second row silently wins. Either
     // way the file is wrong, so say so.
+    //
+    // Unless the target is a partial index, whose uniqueness only holds over
+    // the rows its predicate selects. Two rows sharing the key columns are then
+    // legitimate, and evaluating arbitrary SQL here to tell which is which is
+    // not something we can do; the database still enforces it.
     let key = upsert_key(table, cfg)?;
-    if !key.is_empty() {
+    let partial_target = table.conflict_target(&key).is_some_and(|u| u.is_partial());
+    if !key.is_empty() && !partial_target {
         let positions: Vec<usize> = key
             .iter()
             .filter_map(|k| columns.iter().position(|c| c.name == *k))
@@ -499,7 +505,7 @@ mod tests {
     use crate::config::Engine;
     use crate::config::{Format, JsonMode, Layout};
     use crate::dialect::{Mysql, Postgres, Sqlite};
-    use crate::schema::TypeClass;
+    use crate::schema::{TypeClass, UniqueKey};
 
     /// `sql_type` mirrors what `format_type()` reports, since that is what the
     /// write path casts to, it is not the same string as the class label.
@@ -531,7 +537,7 @@ mod tests {
                 ),
             ],
             primary_key: vec!["id".into()],
-            unique: vec![vec!["email".into()]],
+            unique: vec![UniqueKey::total(vec!["email".into()])],
             foreign_keys: vec![],
         }
     }

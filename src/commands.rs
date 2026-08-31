@@ -708,12 +708,29 @@ async fn build_plans(
         let rows = format::read(&out_dir, &columns, cfg, &live.default_schema, lock.engine)?;
         load::validate_rows(table, &columns, &rows, cfg)?;
 
+        let key = load::upsert_key(table, cfg)?;
+        // A partial index only arbitrates the rows its predicate selects. Any
+        // other row falls through to a plain insert, which collides with the
+        // primary key the second time the same file is loaded.
+        if cfg.load_mode == crate::config::LoadMode::Upsert
+            && !table.primary_key.is_empty()
+            && table.primary_key != key
+            && table.conflict_target(&key).is_some_and(|u| u.is_partial())
+        {
+            ctx.warn(format!(
+                "{id}: `key: [{}]` is a partial unique index, so rows outside its \
+                 WHERE are inserted rather than upserted and a second load of them \
+                 will fail on the primary key",
+                key.join(", ")
+            ));
+        }
+
         plans.push(load::TablePlan {
             table: id.clone(),
             mode: cfg.load_mode,
             rows: rows.len() as u64,
             columns: columns.iter().map(|c| c.name.clone()).collect(),
-            key: load::upsert_key(table, cfg)?,
+            key,
         });
         loads.push((cfg.clone(), rows));
     }

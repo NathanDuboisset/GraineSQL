@@ -287,6 +287,37 @@ pub struct ForeignKey {
     pub deferrable: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct UniqueKey {
+    pub columns: Vec<String>,
+    /// The `WHERE` of a partial index, which `ON CONFLICT` has to repeat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicate: Option<String>,
+}
+
+impl std::fmt::Display for UniqueKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "({})", self.columns.join(", "))?;
+        match &self.predicate {
+            Some(p) => write!(f, " where {p}"),
+            None => Ok(()),
+        }
+    }
+}
+
+impl UniqueKey {
+    pub fn total(columns: Vec<String>) -> Self {
+        Self {
+            columns,
+            predicate: None,
+        }
+    }
+
+    pub fn is_partial(&self) -> bool {
+        self.predicate.is_some()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Table {
     /// Redundant with the map key wherever a table is stored, so it is omitted
@@ -296,10 +327,10 @@ pub struct Table {
     pub columns: Vec<Column>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub primary_key: Vec<String>,
-    /// Unique constraints/indexes, each an ordered column list. Candidate
-    /// upsert keys when there is no primary key.
+    /// Unique constraints/indexes. Candidate upsert keys when there is no
+    /// primary key.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub unique: Vec<Vec<String>>,
+    pub unique: Vec<UniqueKey>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub foreign_keys: Vec<ForeignKey>,
 }
@@ -314,13 +345,26 @@ impl Table {
         self.columns.iter().filter(|c| !c.generated)
     }
 
-    /// The key to conflict-target for an upsert: the primary key, else the first
-    /// unique constraint. `None` means upsert is impossible for this table.
+    /// The key to conflict-target for an upsert: the primary key, else a unique
+    /// constraint, preferring a total one. `None` means upsert is impossible.
     pub fn upsert_key(&self) -> Option<&[String]> {
         if !self.primary_key.is_empty() {
             return Some(&self.primary_key);
         }
-        self.unique.first().map(|u| u.as_slice())
+        self.unique
+            .iter()
+            .find(|u| !u.is_partial())
+            .or_else(|| self.unique.first())
+            .map(|u| u.columns.as_slice())
+    }
+
+    /// The unique key an upsert on `columns` should conflict-target. A total
+    /// index wins: it covers every row, so a partial one is redundant.
+    pub fn conflict_target(&self, columns: &[String]) -> Option<&UniqueKey> {
+        let matching = || self.unique.iter().filter(|u| u.columns == columns);
+        matching()
+            .find(|u| !u.is_partial())
+            .or_else(|| matching().next())
     }
 
     /// Identity/serial columns that need their sequence advanced after a load.
@@ -593,7 +637,7 @@ mod tests {
             id: TableId::bare("t"),
             columns: vec![],
             primary_key: vec!["id".into()],
-            unique: vec![vec!["email".into()]],
+            unique: vec![UniqueKey::total(vec!["email".into()])],
             foreign_keys: vec![],
         };
         assert_eq!(t.upsert_key().unwrap(), ["id".to_string()]);

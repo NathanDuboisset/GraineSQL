@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use indexmap::IndexMap;
 
 use crate::db::{Db, Fields};
-use crate::schema::{Column, ForeignKey, Schema, Table, TableId, TypeClass};
+use crate::schema::{Column, ForeignKey, Schema, Table, TableId, TypeClass, UniqueKey};
 
 /// Schemas that never hold user data.
 const SYSTEM_SCHEMAS: &str = "('pg_catalog', 'information_schema', 'pg_toast')";
@@ -49,8 +49,9 @@ SELECT n.nspname                                        AS schema_name,
 
 /// Primary keys and unique constraints usable as upsert targets.
 ///
-/// Partial indexes (`indpred IS NOT NULL`) and expression indexes (an `indkey`
-/// entry of 0) are excluded: neither is a valid `ON CONFLICT` target.
+/// Expression indexes (an `indkey` entry of 0) are excluded: `ON CONFLICT`
+/// cannot name one. Partial indexes are included, since `ON CONFLICT (cols)
+/// WHERE pred` does target them, and sort last so total ones are preferred.
 const KEYS_SQL: &str = "
 SELECT n.nspname                                    AS schema_name,
        c.relname                                    AS table_name,
@@ -58,17 +59,18 @@ SELECT n.nspname                                    AS schema_name,
        (SELECT string_agg(a.attname, ',' ORDER BY k.ord)
           FROM unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord)
           JOIN pg_attribute a
-            ON a.attrelid = c.oid AND a.attnum = k.attnum)  AS cols
+            ON a.attrelid = c.oid AND a.attnum = k.attnum)  AS cols,
+       pg_get_expr(i.indpred, i.indrelid)           AS predicate
   FROM pg_index     i
   JOIN pg_class     c ON c.oid = i.indrelid
   JOIN pg_namespace n ON n.oid = c.relnamespace
  WHERE c.relkind IN ('r', 'p')
    AND (i.indisprimary OR i.indisunique)
    AND i.indisvalid
-   AND i.indpred IS NULL
    AND 0 <> ALL (i.indkey::int2[])
    AND n.nspname NOT IN SYSTEM_SCHEMAS
- ORDER BY n.nspname, c.relname, i.indisprimary DESC, 4
+ ORDER BY n.nspname, c.relname, i.indisprimary DESC,
+          (i.indpred IS NOT NULL), 4
 ";
 
 const FOREIGN_KEYS_SQL: &str = "
@@ -166,17 +168,24 @@ pub async fn introspect(db: &Db) -> Result<Schema> {
         .await
         .context("introspecting primary keys and unique constraints")?
     {
-        let f = Fields::new(&row, 4, "keys")?;
+        let f = Fields::new(&row, 5, "keys")?;
         let id = TableId::new(f.text(0)?, f.text(1)?);
         let is_primary = f.bool(2)?;
         let cols: Vec<String> = split_list(f.text(3)?);
+        let predicate = f.opt(4).map(|p| p.to_string());
         let Some(table) = tables.get_mut(&id) else {
             continue;
         };
         if is_primary {
             table.primary_key = cols;
-        } else if !table.unique.contains(&cols) {
-            table.unique.push(cols);
+        } else {
+            let key = UniqueKey {
+                columns: cols,
+                predicate,
+            };
+            if !table.unique.contains(&key) {
+                table.unique.push(key);
+            }
         }
     }
 

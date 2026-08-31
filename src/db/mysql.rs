@@ -15,7 +15,7 @@ use indexmap::IndexMap;
 
 use crate::db::{Db, Fields};
 use crate::dialect::Dialect as _;
-use crate::schema::{Column, ForeignKey, Schema, Table, TableId, TypeClass};
+use crate::schema::{Column, ForeignKey, Schema, Table, TableId, TypeClass, UniqueKey};
 
 /// Schemas that never hold user data.
 const SYSTEM_SCHEMAS: &str = "('mysql', 'information_schema', 'performance_schema', 'sys')";
@@ -163,8 +163,12 @@ pub async fn introspect(db: &Db) -> Result<Schema> {
         };
         if f.text(2)? == "PRIMARY" {
             table.primary_key = cols;
-        } else if !table.unique.contains(&cols) {
-            table.unique.push(cols);
+        } else {
+            // MySQL has no partial indexes, so the predicate is always absent.
+            let key = UniqueKey::total(cols);
+            if !table.unique.contains(&key) {
+                table.unique.push(key);
+            }
         }
     }
 

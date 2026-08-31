@@ -15,7 +15,7 @@ use indexmap::IndexMap;
 
 use crate::db::{Db, Fields};
 use crate::dialect::Dialect as _;
-use crate::schema::{Column, ForeignKey, Schema, Table, TableId, TypeClass};
+use crate::schema::{Column, ForeignKey, Schema, Table, TableId, TypeClass, UniqueKey};
 
 /// Stands in for a schema name, since SQLite has none.
 pub const SCHEMA: &str = "main";
@@ -120,12 +120,27 @@ pub async fn introspect(db: &Db) -> Result<Schema> {
                 .filter_map(|r| r.get(2).cloned().flatten())
                 .collect();
 
-            // A partial or expression index cannot be a conflict target.
+            // An expression index cannot be a conflict target.
             if cols.is_empty() || cols.len() != table_index_width(db, &index).await? {
                 continue;
             }
-            if cols != table.primary_key && !table.unique.contains(&cols) {
-                table.unique.push(cols);
+            // Column 4 flags a partial index. Skip it if the predicate cannot
+            // be recovered: `ON CONFLICT` without it names nothing the engine
+            // will match.
+            let predicate = if f.text(4)? == "1" {
+                match index_predicate(db, &index).await? {
+                    Some(p) => Some(p),
+                    None => continue,
+                }
+            } else {
+                None
+            };
+            let key = UniqueKey {
+                columns: cols,
+                predicate,
+            };
+            if key.columns != table.primary_key && !table.unique.contains(&key) {
+                table.unique.push(key);
             }
         }
 
@@ -184,6 +199,64 @@ async fn table_index_width(db: &Db, index: &str) -> Result<usize> {
         ))
         .await?
         .len())
+}
+
+/// The `WHERE` clause of a partial index. SQLite exposes no catalog view for
+/// it, only the `CREATE INDEX` text it stored verbatim.
+async fn index_predicate(db: &Db, index: &str) -> Result<Option<String>> {
+    let ddl = db
+        .query_text(&format!(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = '{}'",
+            index.replace('\'', "''")
+        ))
+        .await
+        .with_context(|| format!("reading the definition of index {index}"))?
+        .first()
+        .and_then(|r| r.first().cloned().flatten());
+    Ok(ddl.as_deref().and_then(partial_predicate))
+}
+
+/// Split the predicate off a `CREATE INDEX ... WHERE ...`. The column list is
+/// parenthesised, so the predicate is the only `WHERE` at depth zero.
+fn partial_predicate(ddl: &str) -> Option<String> {
+    let b = ddl.as_bytes();
+    let (mut depth, mut in_str, mut found) = (0i32, false, None);
+    let mut i = 0;
+    while i < b.len() {
+        if in_str {
+            if b[i] == b'\'' {
+                if b.get(i + 1) == Some(&b'\'') {
+                    i += 2;
+                    continue;
+                }
+                in_str = false;
+            }
+        } else {
+            match b[i] {
+                b'\'' => in_str = true,
+                b'(' => depth += 1,
+                b')' => depth -= 1,
+                _ if depth == 0 && is_word_at(b, i, b"WHERE") => {
+                    found = Some(i + 5);
+                    i += 5;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    found
+        .map(|p| ddl[p..].trim().trim_end_matches(';').trim().to_string())
+        .filter(|p| !p.is_empty())
+}
+
+fn is_word_at(b: &[u8], i: usize, word: &[u8]) -> bool {
+    let boundary = |c: Option<&u8>| !c.is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_');
+    b.get(i..i + word.len())
+        .is_some_and(|s| s.eq_ignore_ascii_case(word))
+        && boundary(i.checked_sub(1).and_then(|p| b.get(p)))
+        && boundary(b.get(i + word.len()))
 }
 
 pub async fn list_tables(db: &Db) -> Result<Vec<TableId>> {

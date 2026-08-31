@@ -17,7 +17,8 @@ use serde::{Deserialize, Serialize};
 use crate::config::Engine;
 use crate::schema::{Schema, Table, TableId};
 
-pub const LOCK_VERSION: u32 = 1;
+/// Version 2 changed what the fingerprint covers, so every v1 one is stale.
+pub const LOCK_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileEntry {
@@ -237,12 +238,14 @@ pub fn fingerprint_table(table: &Table) -> String {
     let mut columns: Vec<&crate::schema::Column> = table.columns.iter().collect();
     columns.sort_by(|a, b| a.name.cmp(&b.name));
     for c in columns {
+        // `sql_type` is deliberately absent: it is the engine's own spelling,
+        // which no drift rule enforces, and hashing it stopped a lock ever
+        // matching a database on another engine.
         hasher.update(
             format!(
-                "col {} {} {} {} {} {}\n",
+                "col {} {} {} {} {}\n",
                 c.name,
                 c.class.label(),
-                c.sql_type,
                 c.nullable,
                 c.has_default,
                 c.generated,
@@ -253,10 +256,14 @@ pub fn fingerprint_table(table: &Table) -> String {
     hasher.update(format!("pk {}\n", table.primary_key.join(",")).as_bytes());
     // Unique constraints and foreign keys are sets, not sequences, so sort them
     // too rather than trusting catalog iteration order.
-    let mut unique: Vec<&Vec<String>> = table.unique.iter().collect();
+    let mut unique: Vec<&crate::schema::UniqueKey> = table.unique.iter().collect();
     unique.sort();
     for u in unique {
-        hasher.update(format!("uq {}\n", u.join(",")).as_bytes());
+        hasher.update(format!("uq {}", u.columns.join(",")).as_bytes());
+        if let Some(p) = &u.predicate {
+            hasher.update(format!(" where {p}").as_bytes());
+        }
+        hasher.update(b"\n");
     }
     let mut fks: Vec<&crate::schema::ForeignKey> = table.foreign_keys.iter().collect();
     fks.sort_by_key(|f| f.columns.clone());
@@ -293,7 +300,7 @@ pub fn file_hash(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::{Column, ForeignKey, TypeClass};
+    use crate::schema::{Column, ForeignKey, TypeClass, UniqueKey};
 
     fn col(name: &str, class: TypeClass, nullable: bool) -> Column {
         Column {
@@ -377,7 +384,10 @@ mod tests {
     #[test]
     fn fingerprint_ignores_unique_and_foreign_key_ordering() {
         let mut a = schema(vec![table("users")]);
-        a.tables[0].unique = vec![vec!["email".into()], vec!["id".into()]];
+        a.tables[0].unique = vec![
+            UniqueKey::total(vec!["email".into()]),
+            UniqueKey::total(vec!["id".into()]),
+        ];
         let mut b = a.clone();
         b.tables[0].unique.reverse();
         assert_eq!(fingerprint_schema(&a), fingerprint_schema(&b));
