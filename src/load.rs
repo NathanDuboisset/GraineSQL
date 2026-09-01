@@ -159,11 +159,8 @@ pub fn validate_rows(
     // A duplicate key inside one file cannot be resolved by any mode: under
     // insert it aborts, and under upsert the second row silently wins. Either
     // way the file is wrong, so say so.
-    //
-    // Unless the target is a partial index, whose uniqueness only holds over
-    // the rows its predicate selects. Two rows sharing the key columns are then
-    // legitimate, and evaluating arbitrary SQL here to tell which is which is
-    // not something we can do; the database still enforces it.
+    // A partial target is exempt: its uniqueness only holds over the rows its
+    // predicate selects, which we cannot evaluate here.
     let key = upsert_key(table, cfg)?;
     let partial_target = table.conflict_target(&key).is_some_and(|u| u.is_partial());
     if !key.is_empty() && !partial_target {
@@ -557,6 +554,7 @@ mod tests {
             json: JsonMode::Unroll,
             load_mode: mode,
             key: None,
+            on_drift: crate::config::OnDrift::Confirm,
         }
     }
 

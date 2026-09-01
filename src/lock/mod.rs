@@ -53,6 +53,10 @@ pub struct Lock {
     /// Bucket contents, keyed by bucket id. The data counterpart to `files`.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub bucket_files: IndexMap<String, BucketEntry>,
+    /// Drift the user chose to stop being asked about, keyed by table. In the
+    /// lock rather than a sidecar so the decision shows up in review.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub accepted: IndexMap<String, Vec<String>>,
 }
 
 /// A bucket's recorded contents, for `graine verify`.
@@ -81,9 +85,43 @@ impl Lock {
             files: IndexMap::new(),
             buckets: IndexMap::new(),
             bucket_files: IndexMap::new(),
+            accepted: IndexMap::new(),
         };
         lock.fingerprint = fingerprint_schema(schema);
         lock
+    }
+
+    /// Whether `change` on `scope` was accepted, specifically or by a `*`.
+    pub fn is_accepted(&self, scope: &str, change: &str) -> bool {
+        self.accepted
+            .get(scope)
+            .is_some_and(|c| c.iter().any(|e| e == "*" || e == change))
+    }
+
+    pub fn accept(&mut self, scope: &str, change: &str) {
+        let entry = self.accepted.entry(scope.to_string()).or_default();
+        // A blanket acceptance subsumes every specific one on the same table.
+        if change == "*" {
+            entry.clear();
+        } else if entry.iter().any(|e| e == "*") {
+            return;
+        }
+        if !entry.iter().any(|e| e == change) {
+            entry.push(change.to_string());
+            entry.sort();
+        }
+        self.accepted.sort_keys();
+    }
+
+    /// Re-locking absorbs the drift, so specific acceptances are now dead. Only
+    /// a blanket `*`, a standing decision about a table, survives.
+    pub fn carry_accepted(&mut self, previous: &Lock, keep: impl Fn(&str) -> bool) {
+        self.accepted = previous
+            .accepted
+            .iter()
+            .filter(|(scope, changes)| changes.iter().any(|c| c == "*") && keep(scope))
+            .map(|(scope, _)| (scope.clone(), vec!["*".to_string()]))
+            .collect();
     }
 
     /// The schema section as a [`Schema`], qualified against `default_schema`.

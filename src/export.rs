@@ -547,6 +547,7 @@ mod tests {
             json: JsonMode::Unroll,
             load_mode: LoadMode::Upsert,
             key: None,
+            on_drift: crate::config::OnDrift::Confirm,
         }
     }
 

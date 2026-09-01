@@ -440,3 +440,126 @@ fn verify_notices_a_row_count_that_no_longer_matches() {
     std::fs::write(&path, fewer).unwrap();
     f.fail(&["verify"]).says("recorded in graine.lock");
 }
+
+// ---------------------------------------------------------------------------
+// per-table policy and remembered acceptances
+// ---------------------------------------------------------------------------
+
+/// `TABLES`, with `employees` carrying a drift policy.
+fn tables_with_policy(policy: &str) -> String {
+    common::TABLES.replace(
+        "employees: {}\n",
+        &format!("employees:\n    on_drift: {policy}\n"),
+    )
+}
+
+#[test]
+fn an_ignored_table_does_not_prompt_or_abort() {
+    let base = require_pg!();
+    let f = Fixture::new("driftignore", &base, common::SCHEMA);
+    f.sql_src(common::DATA).unwrap();
+    f.write_config(&tables_with_policy("ignore"));
+    f.ok(&["lock", "-q"]);
+    f.ok(&["export", "-q"]);
+
+    for db in [0, 1] {
+        let sql = "ALTER TABLE employees DROP COLUMN name";
+        if db == 0 {
+            f.sql_src(sql)
+        } else {
+            f.sql_dst(sql)
+        }
+        .unwrap();
+    }
+
+    // No --yes, no terminal: this would refuse if the change still counted.
+    f.ok(&["export", "-q"]);
+}
+
+#[test]
+fn an_abort_policy_makes_a_prompt_fatal() {
+    let base = require_pg!();
+    let f = Fixture::new("driftabort", &base, common::SCHEMA);
+    f.sql_src(common::DATA).unwrap();
+    f.write_config(&tables_with_policy("abort"));
+    f.ok(&["lock", "-q"]);
+    f.ok(&["export", "-q"]);
+
+    f.sql_src("ALTER TABLE employees DROP COLUMN name").unwrap();
+
+    // --yes would have accepted it under the default policy.
+    f.fail(&["export", "--yes"]).says("Nothing was changed");
+}
+
+#[test]
+fn drift_accepted_in_the_lock_stops_being_asked_about() {
+    let base = require_pg!();
+    let f = prepared("driftremember", &base);
+    for db in [0, 1] {
+        let sql = "ALTER TABLE employees DROP COLUMN name";
+        if db == 0 {
+            f.sql_src(sql)
+        } else {
+            f.sql_dst(sql)
+        }
+        .unwrap();
+    }
+
+    // Without a record, the command refuses for want of a terminal.
+    f.fail(&["export"]).says("--yes");
+
+    let lock_path = f.seed_dir().join("graine.lock");
+    let lock = std::fs::read_to_string(&lock_path).unwrap();
+    std::fs::write(
+        &lock_path,
+        format!("{lock}accepted:\n  employees:\n  - '*'\n"),
+    )
+    .unwrap();
+
+    f.ok(&["diff"]).says("accepted (in");
+    f.ok(&["export", "-q"]);
+}
+
+#[test]
+fn forgetting_brings_the_prompt_back() {
+    let base = require_pg!();
+    let f = prepared("driftforget", &base);
+    f.sql_src("ALTER TABLE employees DROP COLUMN name").unwrap();
+
+    let lock_path = f.seed_dir().join("graine.lock");
+    let lock = std::fs::read_to_string(&lock_path).unwrap();
+    std::fs::write(
+        &lock_path,
+        format!("{lock}accepted:\n  employees:\n  - '*'\n"),
+    )
+    .unwrap();
+
+    f.ok(&["diff", "--forget", "employees"])
+        .says("forgot accepted drift on 1 table");
+    f.fail(&["export"]).says("--yes");
+}
+
+#[test]
+fn a_blanket_acceptance_survives_a_relock_but_a_specific_one_does_not() {
+    let base = require_pg!();
+    let f = prepared("driftcarry", &base);
+
+    let lock_path = f.seed_dir().join("graine.lock");
+    let lock = std::fs::read_to_string(&lock_path).unwrap();
+    std::fs::write(
+        &lock_path,
+        format!("{lock}accepted:\n  employees:\n  - '*'\n  orders:\n  - table dropped\n"),
+    )
+    .unwrap();
+
+    f.ok(&["lock", "-q"]);
+    let after = std::fs::read_to_string(&lock_path).unwrap();
+    assert!(
+        after.contains("employees"),
+        "the blanket entry was lost:\n{after}"
+    );
+    assert!(
+        !after.contains("table dropped"),
+        "a specific entry outlived the re-lock that absorbed it:\n{after}"
+    );
+}

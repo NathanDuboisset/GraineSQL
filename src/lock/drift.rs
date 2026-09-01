@@ -95,6 +95,22 @@ impl fmt::Display for Drift {
     }
 }
 
+impl Drift {
+    /// How this change is keyed in the lock's `accepted` section. Rewording a
+    /// message retires its acceptances, which just brings the prompt back once.
+    pub fn accept_entry(&self, default_schema: &str) -> (String, String) {
+        let scope = match self.target.table() {
+            Some(t) => crate::lock::relative(t, default_schema).to_string(),
+            None => self.target.to_string(),
+        };
+        let change = match self.target.column() {
+            Some(c) => format!("{c}: {}", self.what),
+            None => self.what.clone(),
+        };
+        (scope, change)
+    }
+}
+
 /// The full comparison result.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Report {

@@ -1,6 +1,7 @@
 //! Command implementations, the layer that wires config, database, lock, and
 //! formats together.
 
+use std::collections::BTreeSet;
 use std::io::Write as _;
 use std::path::PathBuf;
 
@@ -94,6 +95,24 @@ impl Ctx {
         }
         confirm(prompt)
     }
+
+    /// Ask a drift question, which also offers "and stop asking". `--yes`
+    /// accepts without remembering: it is a CI switch, not a decision.
+    pub fn confirm_drift(&self, prompt: &str, scope: &str) -> Result<Answer> {
+        if self.assume_yes {
+            self.warn(format!("{prompt} yes (--yes)"));
+            return Ok(Answer::Once);
+        }
+        confirm_drift(prompt, scope)
+    }
+}
+
+/// What the user said to one drift prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answer {
+    Once,
+    No,
+    Always,
 }
 
 /// Introspect the live schema, pruned to the configured tables and their
@@ -197,11 +216,24 @@ pub fn gate_on_drift_with_buckets(
         });
     }
 
+    // A per-table `on_drift: ignore` drops the change before anything acts on
+    // it, which is the point: it must not need a blanket --force.
+    let policy = drift_policy(ctx)?;
+    report.drifts.retain(|d| {
+        table_policy(&policy, d, &live.default_schema) != crate::config::OnDrift::Ignore
+    });
+
     if report.is_empty() {
         return Ok(report);
     }
 
-    if report.has_breaking() && !force {
+    let hard = report.drifts.iter().any(|d| {
+        d.severity == drift::Severity::Breaking
+            || (d.severity == drift::Severity::Confirm
+                && table_policy(&policy, d, &live.default_schema) == crate::config::OnDrift::Abort)
+    });
+
+    if hard && !force {
         bail!(
             "schema drift vs graine.lock\n{}\nNothing was changed. Review, then run \
              `graine lock` to accept, or --force to proceed anyway.",
@@ -211,20 +243,74 @@ pub fn gate_on_drift_with_buckets(
 
     ctx.warn(format!("schema drift vs graine.lock\n{}", report.render()));
 
-    if report.has_breaking() {
+    if hard {
         ctx.warn("proceeding past breaking drift because --force was given");
         return Ok(report);
     }
 
     // One prompt per change, so accepting the loss of one column is never taken
     // as accepting the loss of another.
+    let mut remember: Vec<(String, String)> = Vec::new();
     for d in report.confirm() {
-        let accepted = ctx.confirm(&format!("{}: {}. Accept?", d.target, d.what))?;
-        if !accepted {
-            bail!("declined {} ({}); nothing was changed", d.target, d.what);
+        let (scope, change) = d.accept_entry(&live.default_schema);
+        if lock.is_accepted(&scope, &change) {
+            ctx.detail(format!("  {scope}: {change} (accepted in graine.lock)"));
+            continue;
+        }
+        match ctx.confirm_drift(&format!("{}: {}.", d.target, d.what), &scope)? {
+            Answer::Once => {}
+            Answer::No => bail!("declined {} ({}); nothing was changed", d.target, d.what),
+            Answer::Always => remember.push((scope, "*".to_string())),
         }
     }
+
+    if !remember.is_empty() {
+        persist_accepted(ctx, &remember)?;
+    }
     Ok(report)
+}
+
+/// Per-table drift policy, keyed by resolved table id.
+fn drift_policy(ctx: &Ctx) -> Result<Vec<(TableId, crate::config::OnDrift)>> {
+    Ok(ctx
+        .cfg
+        .resolved_tables()?
+        .into_iter()
+        .map(|t| (t.id, t.on_drift))
+        .collect())
+}
+
+fn table_policy(
+    policy: &[(TableId, crate::config::OnDrift)],
+    d: &drift::Drift,
+    default_schema: &str,
+) -> crate::config::OnDrift {
+    d.target
+        .table()
+        .and_then(|t| {
+            policy
+                .iter()
+                .find(|(id, _)| id.matches(t, default_schema))
+                .map(|(_, p)| *p)
+        })
+        .unwrap_or(crate::config::OnDrift::Confirm)
+}
+
+/// Write newly accepted drift back into the lock.
+fn persist_accepted(ctx: &Ctx, entries: &[(String, String)]) -> Result<()> {
+    let path = ctx.cfg.lock_path();
+    let mut lock = Lock::read(&path)?;
+    for (scope, change) in entries {
+        lock.accept(scope, change);
+    }
+    lock.write(&path)?;
+    for (scope, _) in entries {
+        ctx.say(format!(
+            "remembered: drift on {scope} will not be asked about again (recorded in {})",
+            path.display()
+        ));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -391,6 +477,8 @@ pub async fn cmd_lock(ctx: &Ctx, check: bool) -> Result<()> {
             .filter(|(id, _)| lock.schema.contains_key(*id))
             .map(|(id, e)| (id.clone(), e.clone()))
             .collect();
+        let scopes: BTreeSet<String> = lock.schema.keys().map(|id| id.to_string()).collect();
+        lock.carry_accepted(prev, |s| scopes.contains(s) || s.starts_with("bucket "));
     }
     lock.write(&lock_path)?;
 
@@ -420,16 +508,45 @@ pub async fn cmd_lock(ctx: &Ctx, check: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn cmd_diff(ctx: &Ctx) -> Result<()> {
+pub async fn cmd_diff(ctx: &Ctx, forget: Vec<String>, forget_all: bool) -> Result<()> {
+    let path = ctx.cfg.lock_path();
+
+    if forget_all || !forget.is_empty() {
+        let mut lock = Lock::read(&path)?;
+        let before = lock.accepted.len();
+        if forget_all {
+            lock.accepted.clear();
+        } else {
+            lock.accepted
+                .retain(|scope, _| !forget.iter().any(|f| f == scope));
+        }
+        let dropped = before - lock.accepted.len();
+        lock.write(&path)?;
+        ctx.say(format!(
+            "forgot accepted drift on {dropped} table{}",
+            if dropped == 1 { "" } else { "s" }
+        ));
+        return Ok(());
+    }
+
     let (_src, db) = ctx.connect(1).await?;
     let live = introspect(&db, &ctx.cfg).await?;
-    let lock = Lock::read(&ctx.cfg.lock_path())?;
+    let lock = Lock::read(&path)?;
     let report = drift::classify(&lock.to_schema_for(&live), &live);
 
     if ctx.json {
         println!("{}", drift_json(&report));
     } else {
         print!("{}", report.render());
+        if !lock.accepted.is_empty() {
+            println!("\naccepted (in {}, `--forget` to undo):", path.display());
+            for (scope, changes) in &lock.accepted {
+                for c in changes {
+                    let what = if c == "*" { "all drift" } else { c };
+                    println!("  {scope:<28}  {what}");
+                }
+            }
+        }
     }
 
     if report.has_breaking() {
@@ -622,6 +739,12 @@ pub async fn cmd_export(
     lock.files = files;
     lock.buckets = bucket_settings;
     lock.bucket_files = bucket_entries;
+    // Export rebuilds the lock from scratch, so without this an acceptance
+    // recorded during a load is silently dropped by the next export.
+    if let Ok(prev) = Lock::read(&lock_path) {
+        let scopes: BTreeSet<String> = lock.schema.keys().map(|id| id.to_string()).collect();
+        lock.carry_accepted(&prev, |s| scopes.contains(s) || s.starts_with("bucket "));
+    }
     lock.write(&lock_path)?;
 
     if ctx.json {
@@ -709,9 +832,8 @@ async fn build_plans(
         load::validate_rows(table, &columns, &rows, cfg)?;
 
         let key = load::upsert_key(table, cfg)?;
-        // A partial index only arbitrates the rows its predicate selects. Any
-        // other row falls through to a plain insert, which collides with the
-        // primary key the second time the same file is loaded.
+        // Rows outside the predicate get no arbiter, so they plain-insert and
+        // collide with the primary key on the second load.
         if cfg.load_mode == crate::config::LoadMode::Upsert
             && !table.primary_key.is_empty()
             && table.primary_key != key
@@ -1045,6 +1167,22 @@ fn confirm(prompt: &str) -> Result<bool> {
     ))
 }
 
+fn confirm_drift(prompt: &str, scope: &str) -> Result<Answer> {
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        bail!("{prompt} (no terminal to ask on; pass --yes to accept)");
+    }
+    eprintln!("{prompt}");
+    eprint!("  [y] accept once  [n] refuse  [a] accept and remember for {scope} ");
+    std::io::stderr().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    Ok(match answer.trim().to_ascii_lowercase().as_str() {
+        "y" | "yes" => Answer::Once,
+        "a" | "always" => Answer::Always,
+        _ => Answer::No,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // verify
 // ---------------------------------------------------------------------------
@@ -1205,7 +1343,7 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
         Command::Status => cmd_status(&ctx).await,
         Command::Sources { no_connect } => cmd_sources(&ctx, no_connect).await,
         Command::Lock { check } => cmd_lock(&ctx, check).await,
-        Command::Diff => cmd_diff(&ctx).await,
+        Command::Diff { forget, forget_all } => cmd_diff(&ctx, forget, forget_all).await,
         Command::Export {
             tables,
             buckets,

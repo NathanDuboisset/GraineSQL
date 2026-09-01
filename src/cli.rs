@@ -93,7 +93,14 @@ pub enum Command {
     },
 
     /// Show how the live schema differs from graine.lock.
-    Diff,
+    Diff {
+        /// Stop remembering accepted drift on these tables.
+        #[arg(long, value_name = "TABLE", num_args = 1..)]
+        forget: Vec<String>,
+        /// Stop remembering accepted drift on every table.
+        #[arg(long, conflicts_with = "forget")]
+        forget_all: bool,
+    },
 
     /// Export rows and storage buckets from the source into seed files.
     Export {

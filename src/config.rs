@@ -151,6 +151,28 @@ impl LoadMode {
     }
 }
 
+/// What to do about drift on one table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnDrift {
+    /// Even a change that would normally just prompt aborts.
+    Abort,
+    /// Breaking aborts, data-losing prompts, benign proceeds.
+    Confirm,
+    /// Never ask, so a volatile table needs no blanket `--force`.
+    Ignore,
+}
+
+impl OnDrift {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OnDrift::Abort => "abort",
+            OnDrift::Confirm => "confirm",
+            OnDrift::Ignore => "ignore",
+        }
+    }
+}
+
 /// How to reach a source's object storage, for bucket export and load.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -249,6 +271,13 @@ pub struct LoadConfig {
     /// Advance sequences / AUTO_INCREMENT past the loaded keys afterwards.
     #[serde(default = "default_true")]
     pub fix_sequences: bool,
+    /// Default drift policy, overridable per table.
+    #[serde(default = "default_on_drift")]
+    pub on_drift: OnDrift,
+}
+
+fn default_on_drift() -> OnDrift {
+    OnDrift::Confirm
 }
 
 fn default_load_mode() -> LoadMode {
@@ -264,6 +293,7 @@ impl Default for LoadConfig {
             mode: default_load_mode(),
             transaction: true,
             fix_sequences: true,
+            on_drift: default_on_drift(),
         }
     }
 }
@@ -296,6 +326,8 @@ pub struct TableConfig {
     /// Override the upsert conflict target. Defaults to the primary key.
     #[serde(default)]
     pub key: Option<Vec<String>>,
+    #[serde(default)]
+    pub on_drift: Option<OnDrift>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -347,6 +379,7 @@ pub struct ResolvedTable {
     pub json: JsonMode,
     pub load_mode: LoadMode,
     pub key: Option<Vec<String>>,
+    pub on_drift: OnDrift,
 }
 
 impl Config {
@@ -562,6 +595,7 @@ impl Config {
                     json: t.json.unwrap_or(self.export.json),
                     load_mode: t.load_mode.unwrap_or(self.load.mode),
                     key: t.key.clone(),
+                    on_drift: t.on_drift.unwrap_or(self.load.on_drift),
                 })
             })
             .collect()

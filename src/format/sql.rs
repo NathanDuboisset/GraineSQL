@@ -153,6 +153,7 @@ mod tests {
             json: crate::config::JsonMode::Unroll,
             load_mode: mode,
             key: None,
+            on_drift: crate::config::OnDrift::Confirm,
         }
     }
 
@@ -727,6 +728,7 @@ mod read_tests {
             json: JsonMode::Unroll,
             load_mode: mode,
             key: None,
+            on_drift: crate::config::OnDrift::Confirm,
         }
     }
 
