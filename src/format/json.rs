@@ -111,7 +111,7 @@ fn encode_value(
 }
 
 /// Emit a parsed JSON value canonically.
-fn write_json(out: &mut String, v: &serde_json::Value, pretty: bool, depth: usize, sort: bool) {
+pub fn write_json(out: &mut String, v: &serde_json::Value, pretty: bool, depth: usize, sort: bool) {
     match v {
         serde_json::Value::Null => out.push_str("null"),
         serde_json::Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),

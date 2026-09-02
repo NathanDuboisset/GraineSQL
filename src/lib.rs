@@ -6,6 +6,7 @@ pub mod commands;
 pub mod config;
 pub mod db;
 pub mod dialect;
+pub mod diff;
 pub mod export;
 pub mod format;
 pub mod io;

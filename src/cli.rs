@@ -94,6 +94,15 @@ pub enum Command {
 
     /// Show how the live schema differs from graine.lock.
     Diff {
+        /// Also compare the seed rows against the live ones.
+        #[arg(long)]
+        data: bool,
+        /// List every differing row instead of the first few.
+        #[arg(long, requires = "data")]
+        full: bool,
+        /// Only these tables. Names match the config key or the bare table name.
+        #[arg(long, value_delimiter = ',', requires = "data")]
+        tables: Option<Vec<String>>,
         /// Stop remembering accepted drift on these tables.
         #[arg(long, value_name = "TABLE", num_args = 1..)]
         forget: Vec<String>,

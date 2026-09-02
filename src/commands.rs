@@ -508,7 +508,14 @@ pub async fn cmd_lock(ctx: &Ctx, check: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn cmd_diff(ctx: &Ctx, forget: Vec<String>, forget_all: bool) -> Result<()> {
+pub async fn cmd_diff(
+    ctx: &Ctx,
+    data: bool,
+    full: bool,
+    tables: Option<Vec<String>>,
+    forget: Vec<String>,
+    forget_all: bool,
+) -> Result<()> {
     let path = ctx.cfg.lock_path();
 
     if forget_all || !forget.is_empty() {
@@ -534,6 +541,28 @@ pub async fn cmd_diff(ctx: &Ctx, forget: Vec<String>, forget_all: bool) -> Resul
     let lock = Lock::read(&path)?;
     let report = drift::classify(&lock.to_schema_for(&live), &live);
 
+    if data {
+        // Drift first: comparing rows against a schema that moved would report
+        // differences that are really the schema change showing through.
+        if report.has_breaking() {
+            bail!(
+                "schema drift vs graine.lock\n{}\nThe rows cannot be compared until \
+                 this is resolved.",
+                report.render()
+            );
+        }
+        let diffs = data_diff(ctx, &db, &live, &lock, tables).await?;
+        if ctx.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&crate::diff::to_json(&diffs))?
+            );
+        } else {
+            print!("{}", crate::diff::render(&diffs, full));
+        }
+        return Ok(());
+    }
+
     if ctx.json {
         println!("{}", drift_json(&report));
     } else {
@@ -553,6 +582,37 @@ pub async fn cmd_diff(ctx: &Ctx, forget: Vec<String>, forget_all: bool) -> Resul
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// Compare every selected table's seed rows against the live ones.
+async fn data_diff(
+    ctx: &Ctx,
+    db: &Db,
+    live: &Schema,
+    lock: &Lock,
+    tables: Option<Vec<String>>,
+) -> Result<Vec<crate::diff::TableDiff>> {
+    let out_dir = ctx.cfg.out_dir();
+    let selected = ctx.cfg.select_tables(tables.as_deref())?;
+    let order = compute_order(live, &ctx.cfg)?;
+    let batch = crate::diff::chunk_for(db.engine());
+
+    let mut diffs = Vec::new();
+    for id in &order {
+        let Some(cfg) = selected
+            .iter()
+            .find(|t| live.resolve(&t.id).as_ref() == Some(id) || t.id == *id)
+        else {
+            continue;
+        };
+        let table = live
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("table {id} is not in the live schema"))?;
+        let columns = export::selected_columns(table, cfg)?;
+        let rows = format::read(&out_dir, &columns, cfg, &live.default_schema, lock.engine)?;
+        diffs.push(crate::diff::table_diff(db, table, &columns, &rows, cfg, batch).await?);
+    }
+    Ok(diffs)
 }
 
 fn drift_json(report: &drift::Report) -> String {
@@ -919,6 +979,14 @@ pub async fn cmd_load(
     if plans.is_empty() {
         ctx.say("nothing to load");
         return Ok(());
+    }
+
+    // A dry run's job is to say what would change, which a row-level diff
+    // answers far better than a row count does.
+    if dry_run && !ctx.json {
+        let lock = Lock::read(&ctx.cfg.lock_path())?;
+        let diffs = data_diff(ctx, &db, &live, &lock, None).await?;
+        print!("{}", crate::diff::render(&diffs, false));
     }
 
     let reasons = load::confirmation_reasons(&src, &plans);
@@ -1343,7 +1411,13 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
         Command::Status => cmd_status(&ctx).await,
         Command::Sources { no_connect } => cmd_sources(&ctx, no_connect).await,
         Command::Lock { check } => cmd_lock(&ctx, check).await,
-        Command::Diff { forget, forget_all } => cmd_diff(&ctx, forget, forget_all).await,
+        Command::Diff {
+            data,
+            full,
+            tables,
+            forget,
+            forget_all,
+        } => cmd_diff(&ctx, data, full, tables, forget, forget_all).await,
         Command::Export {
             tables,
             buckets,
