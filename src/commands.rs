@@ -655,6 +655,7 @@ pub async fn cmd_export(
     out_override: Option<PathBuf>,
     force: bool,
     no_fk_check: bool,
+    follow_parents: bool,
 ) -> Result<()> {
     let selected = ctx.cfg.select_tables(tables.as_deref())?;
     let buckets = if no_buckets {
@@ -741,11 +742,33 @@ pub async fn cmd_export(
     let mut exports: std::collections::BTreeMap<TableId, export::TableExport> =
         std::collections::BTreeMap::new();
 
+    // Resolved before anything is written: the pulled rows have to arrive under
+    // the same ORDER BY as the rest, not be appended afterwards.
+    let pulled = if follow_parents || ctx.cfg.export.follow_parents {
+        let (pulled, pulls) =
+            crate::closure::resolve(&db, &live, &ordered, crate::closure::DEFAULT_MAX_DEPTH)
+                .await?;
+        let rendered = crate::closure::render(&pulls);
+        if !rendered.is_empty() {
+            ctx.say(format!("following foreign keys:\n{rendered}"));
+        }
+        pulled
+    } else {
+        crate::closure::Pulled::new()
+    };
+
     for cfg in &ordered {
         let id = live.resolve(&cfg.id).unwrap_or_else(|| cfg.id.clone());
         let index = to_index.get(&id).cloned().unwrap_or_default();
-        let exported =
-            export::export_table(&db, &live, cfg, ctx.cfg.export.sql_batch, &index).await?;
+        let exported = export::export_table(
+            &db,
+            &live,
+            cfg,
+            ctx.cfg.export.sql_batch,
+            &index,
+            pulled.get(&id),
+        )
+        .await?;
         ctx.detail(format!(
             "  {} -> {}",
             cfg.id,
@@ -1426,6 +1449,7 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             out,
             force,
             no_fk_check,
+            follow_parents,
         } => {
             cmd_export(
                 &ctx,
@@ -1436,6 +1460,7 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
                 out,
                 force,
                 no_fk_check,
+                follow_parents,
             )
             .await
         }

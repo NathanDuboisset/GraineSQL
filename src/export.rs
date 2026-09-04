@@ -164,7 +164,8 @@ pub fn render_dangling(items: &[Dangling]) -> String {
     }
     out.push_str(
         "\nLoading this into an empty database would fail partway through. \
-         Fix graine.yaml, or pass --no-fk-check to export anyway.\n",
+         Fix graine.yaml, pass --follow-parents to pull the missing rows in, \
+         or --no-fk-check to export anyway.\n",
     );
     out
 }
@@ -271,20 +272,27 @@ pub fn build_query(
     columns: &[&Column],
     cfg: &ResolvedTable,
 ) -> Result<String> {
-    let select = columns
+    build_query_with(dialect, table, columns, columns, cfg, None)
+}
+
+/// [`build_query`], selecting `select` while ordering and limiting as though
+/// `columns` were being read, and optionally widened by `also`.
+///
+/// Splitting the two lists lets a key-only pre-pass pick exactly the rows the
+/// full export will, since `LIMIT` without the full `ORDER BY` picks others.
+pub fn build_query_with(
+    dialect: &dyn Dialect,
+    table: &Table,
+    columns: &[&Column],
+    select: &[&Column],
+    cfg: &ResolvedTable,
+    also: Option<&str>,
+) -> Result<String> {
+    let select_list = select
         .iter()
         .map(|c| dialect.read_expr(c))
         .collect::<Vec<_>>()
         .join(", ");
-
-    let mut sql = format!("SELECT {select} FROM {}", dialect.quote_table(&table.id));
-
-    if let Some(filter) = &cfg.filter {
-        // Raw SQL by design: `where:` is an escape hatch for the source dialect,
-        // and it comes from the config file, not from data. Parenthesised so a
-        // predicate containing OR cannot change the shape of the statement.
-        sql.push_str(&format!(" WHERE ({filter})"));
-    }
 
     for key in &cfg.order_by {
         if table.column(key).is_none() {
@@ -298,7 +306,9 @@ pub fn build_query(
     }
 
     let order = total_order(table, columns, cfg);
-    if !order.is_empty() {
+    let order_by = if order.is_empty() {
+        String::new()
+    } else {
         let terms: Vec<String> = order
             .iter()
             .map(|name| match table.column(name) {
@@ -306,10 +316,61 @@ pub fn build_query(
                 None => dialect.quote_ident(name),
             })
             .collect();
-        sql.push_str(&format!(" ORDER BY {}", terms.join(", ")));
-    }
+        format!(" ORDER BY {}", terms.join(", "))
+    };
 
-    if let Some(limit) = cfg.limit {
+    // Raw SQL by design: `where:` is an escape hatch for the source dialect, and
+    // it comes from the config file, not from data. Parenthesised so a predicate
+    // containing OR cannot change the shape of the statement.
+    let filter = cfg.filter.as_ref().map(|f| format!("({f})"));
+    let quoted = dialect.quote_table(&table.id);
+
+    let where_clause = match (&filter, also, cfg.limit) {
+        (_, None, _) => filter.clone().map(|f| format!(" WHERE {f}")),
+        // The limit applies to the filtered rows only; the extra ones are added
+        // on top, or the limit would cut straight back through them.
+        (_, Some(extra), Some(limit)) => {
+            let pk: Vec<&Column> = table
+                .primary_key
+                .iter()
+                .filter_map(|k| table.column(k))
+                .collect();
+            if pk.len() != table.primary_key.len() || pk.is_empty() {
+                bail!(
+                    "table {}: cannot pull in extra rows because it has `limit:` but no \
+                     primary key to identify the limited rows by",
+                    cfg.id
+                );
+            }
+            let pk_list = pk
+                .iter()
+                .map(|c| dialect.read_expr(c))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let inner_where = filter
+                .clone()
+                .map(|f| format!(" WHERE {f}"))
+                .unwrap_or_default();
+            let inner =
+                format!("SELECT {pk_list} FROM {quoted}{inner_where}{order_by} LIMIT {limit}");
+            let tuple = if pk.len() == 1 {
+                pk_list.clone()
+            } else {
+                format!("({pk_list})")
+            };
+            Some(format!(" WHERE {tuple} IN ({inner}) OR ({extra})"))
+        }
+        (Some(f), Some(extra), None) => Some(format!(" WHERE {f} OR ({extra})")),
+        (None, Some(_), None) => None,
+    };
+
+    let mut sql = format!("SELECT {select_list} FROM {quoted}");
+    sql.push_str(&where_clause.unwrap_or_default());
+    sql.push_str(&order_by);
+    // Already applied inside the subquery when rows were pulled in.
+    if let Some(limit) = cfg.limit
+        && also.is_none()
+    {
         sql.push_str(&format!(" LIMIT {limit}"));
     }
 
@@ -359,6 +420,7 @@ pub async fn export_table(
     cfg: &ResolvedTable,
     sql_batch: usize,
     index: &[Vec<String>],
+    pulled: Option<&std::collections::BTreeSet<Vec<String>>>,
 ) -> Result<TableExport> {
     let id = schema.resolve(&cfg.id).unwrap_or_else(|| cfg.id.clone());
     let table = schema
@@ -367,7 +429,23 @@ pub async fn export_table(
 
     let columns = selected_columns(table, cfg)?;
     let classes: Vec<_> = columns.iter().map(|c| c.class.clone()).collect();
-    let query = build_query(db.dialect(), table, &columns, cfg)?;
+    let also = pulled.and_then(|tuples| {
+        let pk: Vec<&Column> = table
+            .primary_key
+            .iter()
+            .filter_map(|k| table.column(k))
+            .collect();
+        let list: Vec<Vec<String>> = tuples.iter().cloned().collect();
+        db.dialect().tuple_predicate(&pk, &list)
+    });
+    let query = build_query_with(
+        db.dialect(),
+        table,
+        &columns,
+        &columns,
+        cfg,
+        also.as_deref(),
+    )?;
 
     let mut writer = format::writer(
         table,

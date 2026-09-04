@@ -1,6 +1,7 @@
 //! GraineSQL, deterministic, git-friendly database seed export and load.
 
 pub mod cli;
+pub mod closure;
 pub mod cmd;
 pub mod commands;
 pub mod config;

@@ -67,6 +67,44 @@ pub trait Dialect: Send + Sync {
     /// `INSERT` keyword sequence, which MySQL varies to express "skip existing".
     fn insert_verb(&self, mode: LoadMode) -> &'static str;
 
+    /// `c IN ('a', 'b')` for one column, else `(a = 'x' AND b = 'y') OR ...`.
+    ///
+    /// Spelled out rather than using row-value `IN`, whose support differs
+    /// across the engines. Compared against `read_expr`, which is text
+    /// everywhere, so text literals are always the right shape.
+    fn tuple_predicate(&self, cols: &[&Column], tuples: &[Vec<String>]) -> Option<String> {
+        if cols.is_empty() || tuples.is_empty() {
+            return None;
+        }
+        if cols.len() == 1 {
+            let list: Vec<String> = tuples
+                .iter()
+                .filter_map(|t| t.first())
+                .map(|v| sql_literal(v))
+                .collect();
+            return Some(format!(
+                "{} IN ({})",
+                self.read_expr(cols[0]),
+                list.join(", ")
+            ));
+        }
+        Some(
+            tuples
+                .iter()
+                .filter(|t| t.len() == cols.len())
+                .map(|t| {
+                    let terms: Vec<String> = cols
+                        .iter()
+                        .zip(t)
+                        .map(|(c, v)| format!("{} = {}", self.read_expr(c), sql_literal(v)))
+                        .collect();
+                    format!("({})", terms.join(" AND "))
+                })
+                .collect::<Vec<_>>()
+                .join(" OR "),
+        )
+    }
+
     /// The `ON CONFLICT` target: the column list, plus the predicate when the
     /// only matching index is a partial one.
     fn conflict_target(&self, table: &Table, key: &[String]) -> String {
@@ -145,6 +183,11 @@ pub trait Dialect: Send + Sync {
     fn delete_all(&self, id: &TableId) -> String {
         format!("DELETE FROM {}", self.quote_table(id))
     }
+}
+
+/// A single-quoted text literal, with quotes doubled.
+pub fn sql_literal(v: &str) -> String {
+    format!("'{}'", v.replace('\'', "''"))
 }
 
 pub fn for_engine(engine: Engine) -> Box<dyn Dialect> {

@@ -141,6 +141,11 @@ pub enum Command {
         /// export. The files may then fail to load into an empty database.
         #[arg(long)]
         no_fk_check: bool,
+
+        /// Pull in the parent rows a filter would otherwise orphan, widening
+        /// the parent's own `where` where it has to.
+        #[arg(long, conflicts_with = "no_fk_check")]
+        follow_parents: bool,
     },
 
     /// Show the load order, row counts, and per-table action. Writes nothing.

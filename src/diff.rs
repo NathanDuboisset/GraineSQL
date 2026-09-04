@@ -8,7 +8,6 @@ use std::collections::BTreeMap;
 
 use crate::config::{LoadMode, ResolvedTable};
 use crate::db::Db;
-use crate::dialect::Dialect;
 use crate::schema::{Column, Table};
 use crate::value::Value;
 
@@ -187,8 +186,11 @@ async fn fetch_live(
 
     let mut found = BTreeMap::new();
     for chunk in seed.chunks(batch.max(1)) {
-        let keys: Vec<&Vec<String>> = chunk.iter().map(|(k, _)| k).collect();
-        let Some(predicate) = key_predicate(dialect, table, key, &keys) else {
+        let keys: Vec<Vec<String>> = chunk.iter().map(|(k, _)| k.clone()).collect();
+        let Some(cols) = key_columns(table, key) else {
+            continue;
+        };
+        let Some(predicate) = dialect.tuple_predicate(&cols, &keys) else {
             continue;
         };
         let sql = format!(
@@ -214,10 +216,9 @@ async fn fetch_live(
 /// Every live key, for spotting rows a `truncate_first` would remove.
 async fn live_keys(db: &Db, table: &Table, key: &[String]) -> Result<Vec<Vec<String>>> {
     let dialect = db.dialect();
-    let cols: Vec<&Column> = key.iter().filter_map(|k| table.column(k)).collect();
-    if cols.len() != key.len() {
+    let Some(cols) = key_columns(table, key) else {
         return Ok(Vec::new());
-    }
+    };
     let select = cols
         .iter()
         .map(|c| dialect.read_expr(c))
@@ -239,52 +240,10 @@ async fn live_keys(db: &Db, table: &Table, key: &[String]) -> Result<Vec<Vec<Str
     Ok(out)
 }
 
-/// `k IN ('a','b')` for a single-column key, else `(a = 'x' AND b = 'y') OR ...`.
-///
-/// Spelled out rather than using row-value `IN`, whose support differs across
-/// the three engines.
-fn key_predicate(
-    dialect: &dyn Dialect,
-    table: &Table,
-    key: &[String],
-    keys: &[&Vec<String>],
-) -> Option<String> {
-    if keys.is_empty() {
-        return None;
-    }
+/// The key columns, in key order.
+fn key_columns<'a>(table: &'a Table, key: &[String]) -> Option<Vec<&'a Column>> {
     let cols: Vec<&Column> = key.iter().filter_map(|k| table.column(k)).collect();
-    if cols.len() != key.len() {
-        return None;
-    }
-
-    if cols.len() == 1 {
-        let list = keys
-            .iter()
-            .map(|k| quote(&k[0]))
-            .collect::<Vec<_>>()
-            .join(", ");
-        return Some(format!("{} IN ({list})", dialect.read_expr(cols[0])));
-    }
-
-    Some(
-        keys.iter()
-            .map(|k| {
-                let terms: Vec<String> = cols
-                    .iter()
-                    .zip(*k)
-                    .map(|(c, v)| format!("{} = {}", dialect.read_expr(c), quote(v)))
-                    .collect();
-                format!("({})", terms.join(" AND "))
-            })
-            .collect::<Vec<_>>()
-            .join(" OR "),
-    )
-}
-
-/// The key is compared against `read_expr`, which is text on every engine, so
-/// a text literal is always the right shape.
-fn quote(v: &str) -> String {
-    format!("'{}'", v.replace('\'', "''"))
+    (cols.len() == key.len()).then_some(cols)
 }
 
 /// Render the diffs the way `graine diff --data` prints them.
@@ -394,7 +353,7 @@ pub fn to_json(diffs: &[TableDiff]) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dialect::Postgres;
+    use crate::dialect::{Dialect as _, Postgres};
     use crate::schema::{TableId, TypeClass};
 
     fn col(name: &str, class: TypeClass) -> Column {
@@ -422,9 +381,9 @@ mod tests {
     #[test]
     fn a_single_column_key_uses_an_in_list() {
         let t = table(vec![col("id", TypeClass::Int { bits: 32 })], vec!["id"]);
-        let keys = [vec!["1".to_string()], vec!["2".to_string()]];
-        let refs: Vec<&Vec<String>> = keys.iter().collect();
-        let p = key_predicate(&Postgres, &t, &["id".into()], &refs).unwrap();
+        let cols = key_columns(&t, &["id".into()]).unwrap();
+        let tuples = [vec!["1".to_string()], vec!["2".to_string()]];
+        let p = Postgres.tuple_predicate(&cols, &tuples).unwrap();
         assert_eq!(p, "\"id\"::text IN ('1', '2')");
     }
 
@@ -437,9 +396,9 @@ mod tests {
             ],
             vec!["a", "b"],
         );
-        let keys = [vec!["x".to_string(), "y".to_string()]];
-        let refs: Vec<&Vec<String>> = keys.iter().collect();
-        let p = key_predicate(&Postgres, &t, &["a".into(), "b".into()], &refs).unwrap();
+        let cols = key_columns(&t, &["a".into(), "b".into()]).unwrap();
+        let tuples = [vec!["x".to_string(), "y".to_string()]];
+        let p = Postgres.tuple_predicate(&cols, &tuples).unwrap();
         assert_eq!(p, "(\"a\"::text = 'x' AND \"b\"::text = 'y')");
     }
 
@@ -449,9 +408,9 @@ mod tests {
             vec![col("id", TypeClass::Text { max_len: None })],
             vec!["id"],
         );
-        let keys = [vec!["o'brien".to_string()]];
-        let refs: Vec<&Vec<String>> = keys.iter().collect();
-        let p = key_predicate(&Postgres, &t, &["id".into()], &refs).unwrap();
+        let cols = key_columns(&t, &["id".into()]).unwrap();
+        let tuples = [vec!["o'brien".to_string()]];
+        let p = Postgres.tuple_predicate(&cols, &tuples).unwrap();
         assert_eq!(p, "\"id\"::text IN ('o''brien')");
     }
 

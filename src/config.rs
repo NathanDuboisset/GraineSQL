@@ -230,6 +230,10 @@ pub struct ExportConfig {
     /// Number of tables exported concurrently. Cannot affect output bytes.
     #[serde(default = "default_concurrency")]
     pub concurrency: usize,
+    /// Pull in the parent rows a filtered slice needs, rather than only
+    /// reporting that they are missing.
+    #[serde(default)]
+    pub follow_parents: bool,
 }
 
 fn default_out() -> PathBuf {
@@ -256,6 +260,7 @@ impl Default for ExportConfig {
             json: default_json_mode(),
             sql_batch: default_sql_batch(),
             concurrency: default_concurrency(),
+            follow_parents: false,
         }
     }
 }
