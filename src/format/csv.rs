@@ -9,8 +9,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
-use crate::format::{Output, RowWriter};
-use crate::io::LineBuffer;
+use crate::format::{RowWriter, Written};
+use crate::io::LineSink;
 use crate::schema::Column;
 use crate::value::Value;
 
@@ -128,35 +128,38 @@ pub fn decode_field(col: &Column, text: &str, quoted: bool) -> Result<Value> {
 pub struct CsvWriter<'a> {
     path: String,
     columns: Vec<&'a Column>,
-    buf: LineBuffer,
+    sink: LineSink<crate::io::AtomicFile>,
 }
 
 impl<'a> CsvWriter<'a> {
-    pub fn new(path: String, columns: Vec<&'a Column>) -> Self {
-        let mut buf = LineBuffer::new();
+    pub fn new(out_dir: &Path, path: String, columns: Vec<&'a Column>) -> Result<Self> {
+        let mut sink = LineSink::new(crate::format::open(out_dir, &path)?);
         // Header from the lock's column order, so a reader can map by name.
         let header: Vec<String> = columns
             .iter()
             .map(|c| encode_field(&Value::Text(c.name.clone())))
             .collect();
-        buf.push_line(&encode_record(&header));
-        Self { path, columns, buf }
+        sink.push_line(&encode_record(&header))?;
+        Ok(Self {
+            path,
+            columns,
+            sink,
+        })
     }
 }
 
 impl RowWriter for CsvWriter<'_> {
     fn write_row(&mut self, row: &[Value]) -> Result<()> {
         let fields: Vec<String> = row.iter().map(encode_field).collect();
-        self.buf.push_line(&encode_record(&fields));
-        Ok(())
+        self.sink.push_line(&encode_record(&fields))
     }
 
-    fn finish(self: Box<Self>) -> Result<Vec<Output>> {
+    fn finish(self: Box<Self>) -> Result<Written> {
         let _ = &self.columns;
-        Ok(vec![Output {
-            path: self.path,
-            bytes: self.buf.finish(),
-        }])
+        Ok(Written {
+            sha256: self.sink.finish()?.commit()?,
+            paths: vec![self.path],
+        })
     }
 }
 
@@ -419,13 +422,15 @@ mod tests {
             col("name", TypeClass::Text { max_len: None }),
         ];
         let refs: Vec<&Column> = cols.iter().collect();
-        let mut w = Box::new(CsvWriter::new("t.csv".into(), refs));
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = Box::new(CsvWriter::new(dir.path(), "t.csv".into(), refs).unwrap());
         w.write_row(&[Value::Int(1), Value::Text("a".into())])
             .unwrap();
         w.write_row(&[Value::Int(2), Value::Null]).unwrap();
         let out = w.finish().unwrap();
+        assert_eq!(out.paths, vec!["t.csv".to_string()]);
         assert_eq!(
-            String::from_utf8(out[0].bytes.clone()).unwrap(),
+            std::fs::read_to_string(dir.path().join("t.csv")).unwrap(),
             "id,name\n1,a\n2,\n"
         );
     }
@@ -455,11 +460,11 @@ mod tests {
             ],
         ];
 
-        let mut w = Box::new(CsvWriter::new("t.csv".into(), refs.clone()));
+        let mut w = Box::new(CsvWriter::new(dir.path(), "t.csv".into(), refs.clone()).unwrap());
         for r in &rows {
             w.write_row(r).unwrap();
         }
-        std::fs::write(&path, w.finish().unwrap()[0].bytes.clone()).unwrap();
+        w.finish().unwrap();
 
         assert_eq!(read_csv(&path, &refs).unwrap(), rows);
     }

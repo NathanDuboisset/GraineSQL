@@ -738,7 +738,13 @@ pub async fn cmd_export(
         .iter()
         .map(|t| live.resolve(&t.id).unwrap_or_else(|| t.id.clone()))
         .collect();
-    let to_index = export::columns_to_index(&live, &exported_ids);
+    // Skipping the check means the key index is dead weight, and it is the one
+    // thing still held for every table for the whole run.
+    let to_index = if no_fk_check {
+        std::collections::BTreeMap::new()
+    } else {
+        export::columns_to_index(&live, &exported_ids)
+    };
     let mut exports: std::collections::BTreeMap<TableId, export::TableExport> =
         std::collections::BTreeMap::new();
 
@@ -767,19 +773,11 @@ pub async fn cmd_export(
             ctx.cfg.export.sql_batch,
             &index,
             pulled.get(&id),
+            &out_dir,
         )
         .await?;
-        ctx.detail(format!(
-            "  {} -> {}",
-            cfg.id,
-            exported
-                .files
-                .iter()
-                .map(|f| f.path.clone())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-        written.extend(export::write_files(&out_dir, &exported)?);
+        ctx.detail(format!("  {} -> {}", cfg.id, exported.paths.join(", ")));
+        written.extend(exported.paths.iter().map(|p| out_dir.join(p)));
         total_rows += exported.rows;
 
         files.insert(
@@ -787,13 +785,13 @@ pub async fn cmd_export(
             FileEntry {
                 path: export::lock_path(&exported, cfg, &live.default_schema),
                 rows: exported.rows,
-                sha256: export::content_hash(&exported),
+                sha256: exported.sha256.clone(),
             },
         );
         summary.push(serde_json::json!({
             "table": exported.table.to_string(),
             "rows": exported.rows,
-            "files": exported.files.iter().map(|f| f.path.clone()).collect::<Vec<_>>(),
+            "files": exported.paths,
         }));
         exports.insert(exported.table.clone(), exported);
     }

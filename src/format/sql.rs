@@ -9,8 +9,8 @@ use anyhow::{Context, Result, bail};
 
 use crate::config::{Engine, ResolvedTable};
 use crate::dialect::Dialect;
-use crate::format::{Output, RowWriter};
-use crate::io::LineBuffer;
+use crate::format::{RowWriter, Written};
+use crate::io::LineSink;
 use crate::schema::{Column, Table};
 use crate::value::Value;
 
@@ -24,11 +24,12 @@ pub struct SqlWriter<'a> {
     conflict: String,
     batch_size: usize,
     batch: Vec<String>,
-    buf: LineBuffer,
+    sink: LineSink<crate::io::AtomicFile>,
 }
 
 impl<'a> SqlWriter<'a> {
     pub fn new(
+        out_dir: &std::path::Path,
         path: String,
         table: &Table,
         columns: Vec<&'a Column>,
@@ -55,6 +56,7 @@ impl<'a> SqlWriter<'a> {
         );
         let conflict = dialect.conflict_clause(table, &key, &names, cfg.load_mode)?;
 
+        let sink = LineSink::new(crate::format::open(out_dir, &path)?);
         Ok(Self {
             path,
             columns,
@@ -63,15 +65,15 @@ impl<'a> SqlWriter<'a> {
             conflict,
             batch_size: batch_size.max(1),
             batch: Vec::new(),
-            buf: LineBuffer::new(),
+            sink,
         })
     }
 
-    fn flush(&mut self) {
+    fn flush(&mut self) -> Result<()> {
         if self.batch.is_empty() {
-            return;
+            return Ok(());
         }
-        self.buf.push_line(&self.header);
+        self.sink.push_line(&self.header)?;
         let last = self.batch.len() - 1;
         for (i, tuple) in self.batch.iter().enumerate() {
             let terminator = if i == last {
@@ -79,9 +81,10 @@ impl<'a> SqlWriter<'a> {
             } else {
                 ",".into()
             };
-            self.buf.push_line(&format!("  {tuple}{terminator}"));
+            self.sink.push_line(&format!("  {tuple}{terminator}"))?;
         }
         self.batch.clear();
+        Ok(())
     }
 }
 
@@ -95,17 +98,17 @@ impl RowWriter for SqlWriter<'_> {
             .collect::<Result<Vec<_>>>()?;
         self.batch.push(format!("({})", literals.join(", ")));
         if self.batch.len() >= self.batch_size {
-            self.flush();
+            self.flush()?;
         }
         Ok(())
     }
 
-    fn finish(mut self: Box<Self>) -> Result<Vec<Output>> {
-        self.flush();
-        Ok(vec![Output {
-            path: self.path,
-            bytes: self.buf.finish(),
-        }])
+    fn finish(mut self: Box<Self>) -> Result<Written> {
+        self.flush()?;
+        Ok(Written {
+            sha256: self.sink.finish()?.commit()?,
+            paths: vec![self.path],
+        })
     }
 }
 
@@ -164,13 +167,24 @@ mod tests {
         ];
         let t = table(&cols);
         let refs: Vec<&Column> = cols.iter().collect();
+        let dir = tempfile::tempdir().unwrap();
         let mut w = Box::new(
-            SqlWriter::new("users.sql".into(), &t, refs, &cfg(mode), dialect, batch).unwrap(),
+            SqlWriter::new(
+                dir.path(),
+                "users.sql".into(),
+                &t,
+                refs,
+                &cfg(mode),
+                dialect,
+                batch,
+            )
+            .unwrap(),
         );
         for r in rows {
             w.write_row(r).unwrap();
         }
-        String::from_utf8(w.finish().unwrap()[0].bytes.clone()).unwrap()
+        w.finish().unwrap();
+        std::fs::read_to_string(dir.path().join("users.sql")).unwrap()
     }
 
     fn two_rows() -> Vec<Vec<Value>> {
@@ -265,7 +279,9 @@ mod tests {
         let mut t = table(&cols);
         t.primary_key.clear();
         let refs: Vec<&Column> = cols.iter().collect();
+        let dir = tempfile::tempdir().unwrap();
         let err = match SqlWriter::new(
+            dir.path(),
             "t.sql".into(),
             &t,
             refs,
@@ -749,16 +765,24 @@ mod read_tests {
             foreign_keys: vec![],
         };
         let refs: Vec<&Column> = cols.iter().collect();
+        let dir = tempfile::tempdir().unwrap();
         let mut w = Box::new(
-            SqlWriter::new("t.sql".into(), &t, refs.clone(), &cfg(mode), dialect, batch).unwrap(),
+            SqlWriter::new(
+                dir.path(),
+                "t.sql".into(),
+                &t,
+                refs.clone(),
+                &cfg(mode),
+                dialect,
+                batch,
+            )
+            .unwrap(),
         );
         for r in rows {
             w.write_row(r).unwrap();
         }
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("t.sql");
-        std::fs::write(&path, w.finish().unwrap()[0].bytes.clone()).unwrap();
-        read_sql(&path, &refs, engine).unwrap()
+        w.finish().unwrap();
+        read_sql(&dir.path().join("t.sql"), &refs, engine).unwrap()
     }
 
     fn sample() -> Vec<Vec<Value>> {
@@ -850,8 +874,11 @@ mod read_tests {
         let payload = r#"{"note":"see `field_name`","text":"line\nbreak \\ done"}"#;
         let rows = [vec![Value::Int(1), Value::Json(payload.into())]];
 
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.sql");
         let mut w = Box::new(
             SqlWriter::new(
+                dir.path(),
                 "t.sql".into(),
                 &t,
                 refs.clone(),
@@ -862,9 +889,7 @@ mod read_tests {
             .unwrap(),
         );
         w.write_row(&rows[0]).unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("t.sql");
-        std::fs::write(&path, w.finish().unwrap()[0].bytes.clone()).unwrap();
+        w.finish().unwrap();
         assert!(
             std::fs::read_to_string(&path).unwrap().contains('`'),
             "the fixture must contain a backtick to be meaningful"

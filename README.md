@@ -390,8 +390,10 @@ decoder at once and fails on any asymmetry between them.
 
 ## Limitations
 
-- A table's rows are read as a stream but each seed file is built in memory. Seed
-  data that does not fit in memory does not belong in git either.
+- Export streams: rows are read and written one at a time, so a table's size does
+  not bound memory. Loading still reads each file in full, because the pre-flight
+  checks (duplicate keys, nulls in NOT NULL columns) need the whole file before
+  the transaction opens — and failing before it opens is the point.
 - `.sql` output cannot be read back.
 - Bucket objects are held in memory one at a time while hashing, so
   `max_object_bytes` (default 25 MiB) guards against pulling something into git

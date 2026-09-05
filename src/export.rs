@@ -17,7 +17,10 @@ use crate::value::Value;
 pub struct TableExport {
     pub table: crate::schema::TableId,
     pub rows: u64,
-    pub files: Vec<format::Output>,
+    /// Paths written, relative to the output directory.
+    pub paths: Vec<String>,
+    /// Content hash recorded in the lock.
+    pub sha256: String,
     /// Value tuples seen for selected column sets, for the referential check.
     pub keys: KeyIndex,
 }
@@ -421,6 +424,7 @@ pub async fn export_table(
     sql_batch: usize,
     index: &[Vec<String>],
     pulled: Option<&std::collections::BTreeSet<Vec<String>>>,
+    out_dir: &Path,
 ) -> Result<TableExport> {
     let id = schema.resolve(&cfg.id).unwrap_or_else(|| cfg.id.clone());
     let table = schema
@@ -454,6 +458,7 @@ pub async fn export_table(
         db.dialect(),
         &schema.default_schema,
         sql_batch,
+        out_dir,
     )?;
 
     // Positions of the column sets whose values the referential check needs.
@@ -519,42 +524,14 @@ pub async fn export_table(
         return Err(e).with_context(|| format!("exporting {}", cfg.id));
     }
 
+    let written = writer.finish()?;
     Ok(TableExport {
         table: id,
         rows,
-        files: writer.finish()?,
+        paths: written.paths,
+        sha256: written.sha256,
         keys,
     })
-}
-
-/// Write a table's files under `out_dir`.
-pub fn write_files(out_dir: &Path, export: &TableExport) -> Result<Vec<std::path::PathBuf>> {
-    export
-        .files
-        .iter()
-        .map(|f| {
-            let path = out_dir.join(&f.path);
-            crate::io::write_atomic(&path, &f.bytes)?;
-            Ok(path)
-        })
-        .collect()
-}
-
-/// Combined content hash for a table, over its files in path order.
-///
-/// A per-row table has many files; hashing them in a fixed order gives one
-/// comparable value for the lock.
-pub fn content_hash(export: &TableExport) -> String {
-    use sha2::{Digest, Sha256};
-    let mut files: Vec<&format::Output> = export.files.iter().collect();
-    files.sort_by(|a, b| a.path.cmp(&b.path));
-    let mut h = Sha256::new();
-    for f in files {
-        h.update(f.path.as_bytes());
-        h.update(b"\0");
-        h.update(&f.bytes);
-    }
-    format!("{:x}", h.finalize())
 }
 
 /// The path recorded in the lock for a table: the single file, or the directory
@@ -563,9 +540,9 @@ pub fn lock_path(export: &TableExport, cfg: &ResolvedTable, default_schema: &str
     match cfg.layout {
         crate::config::Layout::PerRow => format!("{}/", cfg.id.file_stem(default_schema)),
         crate::config::Layout::Single => export
-            .files
+            .paths
             .first()
-            .map(|f| f.path.clone())
+            .cloned()
             .unwrap_or_else(|| cfg.id.file_stem(default_schema)),
     }
 }
@@ -820,39 +797,6 @@ mod tests {
     }
 
     #[test]
-    fn content_hash_is_order_independent_but_content_sensitive() {
-        let mk = |files: Vec<format::Output>| TableExport {
-            table: TableId::bare("t"),
-            rows: 0,
-            files,
-            keys: KeyIndex::new(),
-        };
-        let a = format::Output {
-            path: "t/a.json".into(),
-            bytes: b"1".to_vec(),
-        };
-        let b = format::Output {
-            path: "t/b.json".into(),
-            bytes: b"2".to_vec(),
-        };
-
-        assert_eq!(
-            content_hash(&mk(vec![a.clone(), b.clone()])),
-            content_hash(&mk(vec![b.clone(), a.clone()])),
-            "file discovery order must not change the hash"
-        );
-        let changed = format::Output {
-            path: "t/b.json".into(),
-            bytes: b"3".to_vec(),
-        };
-        assert_ne!(
-            content_hash(&mk(vec![a.clone(), b])),
-            content_hash(&mk(vec![a, changed])),
-            "changed content must change the hash"
-        );
-    }
-
-    #[test]
     fn lock_path_names_a_directory_for_per_row_tables() {
         let mut c = cfg();
         c.layout = Layout::PerRow;
@@ -860,10 +804,8 @@ mod tests {
         let e = TableExport {
             table: TableId::new("public", "users"),
             rows: 2,
-            files: vec![format::Output {
-                path: "users/1.json".into(),
-                bytes: vec![],
-            }],
+            paths: vec!["users/1.json".into()],
+            sha256: String::new(),
             keys: KeyIndex::new(),
         };
         assert_eq!(lock_path(&e, &c, "public"), "users/");
@@ -872,10 +814,8 @@ mod tests {
         let e = TableExport {
             table: TableId::new("public", "users"),
             rows: 2,
-            files: vec![format::Output {
-                path: "users.jsonl".into(),
-                bytes: vec![],
-            }],
+            paths: vec!["users.jsonl".into()],
+            sha256: String::new(),
             keys: KeyIndex::new(),
         };
         assert_eq!(lock_path(&e, &c, "public"), "users.jsonl");
@@ -888,7 +828,8 @@ mod tests {
         let e = TableExport {
             table: c.id.clone(),
             rows: 0,
-            files: vec![],
+            paths: vec![],
+            sha256: String::new(),
             keys: KeyIndex::new(),
         };
         assert_eq!(lock_path(&e, &c, "public"), "audit.events");

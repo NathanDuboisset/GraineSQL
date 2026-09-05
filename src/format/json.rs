@@ -11,8 +11,8 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 
 use crate::config::JsonMode;
-use crate::format::{Output, RowWriter};
-use crate::io::LineBuffer;
+use crate::format::{RowWriter, Written};
+use crate::io::LineSink;
 use crate::schema::{Column, Table, TypeClass};
 use crate::value::Value;
 
@@ -334,23 +334,43 @@ fn kind_of(v: &serde_json::Value) -> &'static str {
 
 /// One JSON object per line, the default format, and the one with the cleanest
 /// git diffs, since a changed row is a changed line.
+/// Either a plain file or one behind a gzip encoder.
+///
+/// Split rather than boxed so nothing can accidentally call `flush()` on the
+/// encoder: flate2 answers that with a `Z_SYNC_FLUSH`, which injects an empty
+/// stored block and changes the output bytes.
+enum Sink {
+    Plain(LineSink<crate::io::AtomicFile>),
+    Gzip(LineSink<flate2::write::GzEncoder<crate::io::AtomicFile>>),
+}
+
 pub struct JsonlWriter<'a> {
     path: String,
     columns: Vec<&'a Column>,
     mode: JsonMode,
-    compress: bool,
-    buf: LineBuffer,
+    sink: Sink,
 }
 
 impl<'a> JsonlWriter<'a> {
-    pub fn new(path: String, columns: Vec<&'a Column>, mode: JsonMode, compress: bool) -> Self {
-        Self {
+    pub fn new(
+        out_dir: &Path,
+        path: String,
+        columns: Vec<&'a Column>,
+        mode: JsonMode,
+        compress: bool,
+    ) -> Result<Self> {
+        let file = crate::format::open(out_dir, &path)?;
+        let sink = if compress {
+            Sink::Gzip(LineSink::new(crate::io::gzip_encoder(file)))
+        } else {
+            Sink::Plain(LineSink::new(file))
+        };
+        Ok(Self {
             path,
             columns,
             mode,
-            compress,
-            buf: LineBuffer::new(),
-        }
+            sink,
+        })
     }
 }
 
@@ -359,21 +379,22 @@ impl RowWriter for JsonlWriter<'_> {
         let mut line = String::new();
         // Never pretty: jsonl is one row per line by definition.
         encode_row(&mut line, &self.columns, row, self.mode, false)?;
-        self.buf.push_line(&line);
-        Ok(())
+        match &mut self.sink {
+            Sink::Plain(s) => s.push_line(&line),
+            Sink::Gzip(s) => s.push_line(&line),
+        }
     }
 
-    fn finish(self: Box<Self>) -> Result<Vec<Output>> {
-        let bytes = self.buf.finish();
-        let bytes = if self.compress {
-            crate::io::gzip(&bytes)?
-        } else {
-            bytes
+    fn finish(self: Box<Self>) -> Result<Written> {
+        // An empty gzip member is ~20 bytes, not zero; read_jsonl expects that.
+        let sha256 = match self.sink {
+            Sink::Plain(s) => s.finish()?.commit()?,
+            Sink::Gzip(s) => s.finish()?.finish()?.commit()?,
         };
-        Ok(vec![Output {
-            path: self.path,
-            bytes,
-        }])
+        Ok(Written {
+            sha256,
+            paths: vec![self.path],
+        })
     }
 }
 
@@ -382,12 +403,14 @@ impl RowWriter for JsonlWriter<'_> {
 /// For small, human-edited tables (templates, config rows) where a one-line
 /// diff is unreadable. This is where pretty-printing actually applies.
 pub struct PerRowWriter<'a> {
+    out_dir: std::path::PathBuf,
     dir: String,
     columns: Vec<&'a Column>,
     key: Vec<usize>,
     mode: JsonMode,
     pretty: bool,
-    outputs: Vec<Output>,
+    /// One `(path, hex sha256)` per committed file, in write order.
+    written: Vec<(String, String)>,
     /// Slugs already used, so a collision becomes a suffix rather than a file
     /// silently overwriting another.
     used: BTreeSet<String>,
@@ -395,12 +418,13 @@ pub struct PerRowWriter<'a> {
 
 impl<'a> PerRowWriter<'a> {
     pub fn new(
+        out_dir: &Path,
         dir: String,
         table: &Table,
         columns: Vec<&'a Column>,
         mode: JsonMode,
         pretty: bool,
-    ) -> Self {
+    ) -> Result<Self> {
         // Name files by the primary key when the exported columns include it;
         // otherwise fall back to the row index.
         let key = table
@@ -413,19 +437,25 @@ impl<'a> PerRowWriter<'a> {
         } else {
             Vec::new()
         };
-        Self {
+        // Created up front so a table with no rows still produces a directory
+        // for `read_per_row` to find.
+        let target = out_dir.join(&dir);
+        std::fs::create_dir_all(&target)
+            .with_context(|| format!("creating {}", target.display()))?;
+        Ok(Self {
+            out_dir: out_dir.to_path_buf(),
             dir,
             columns,
             key,
             mode,
             pretty,
-            outputs: Vec::new(),
+            written: Vec::new(),
             used: BTreeSet::new(),
-        }
+        })
     }
 
     fn slug_for(&mut self, row: &[Value]) -> String {
-        let index = self.outputs.len();
+        let index = self.written.len();
         let base = if self.key.is_empty() {
             format!("{:06}", index)
         } else {
@@ -457,17 +487,34 @@ impl RowWriter for PerRowWriter<'_> {
         let mut text = String::new();
         encode_row(&mut text, &self.columns, row, self.mode, self.pretty)?;
         let slug = self.slug_for(row);
-        let mut buf = LineBuffer::new();
-        buf.push_str(&text);
-        self.outputs.push(Output {
-            path: format!("{}/{slug}.json", self.dir),
-            bytes: buf.finish(),
-        });
+        let path = format!("{}/{slug}.json", self.dir);
+        let mut sink = LineSink::new(crate::format::open(&self.out_dir, &path)?);
+        sink.push_str(&text)?;
+        let sha = sink.finish()?.commit()?;
+        self.written.push((path, sha));
         Ok(())
     }
 
-    fn finish(self: Box<Self>) -> Result<Vec<Output>> {
-        Ok(self.outputs)
+    /// Hash of hashes, in path order.
+    ///
+    /// Files are produced in row order but the rule is path order, so folding
+    /// the per-file digests is what lets this stream: retaining every file's
+    /// bytes to hash them later is exactly what streaming removes.
+    fn finish(self: Box<Self>) -> Result<Written> {
+        use sha2::Digest as _;
+        let mut sorted = self.written.clone();
+        sorted.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut h = sha2::Sha256::new();
+        for (path, sha) in &sorted {
+            h.update(path.as_bytes());
+            h.update(b"\0");
+            h.update(sha.as_bytes());
+            h.update(b"\0");
+        }
+        Ok(Written {
+            paths: self.written.into_iter().map(|(p, _)| p).collect(),
+            sha256: format!("{:x}", h.finalize()),
+        })
     }
 }
 
@@ -1054,33 +1101,33 @@ mod tests {
     fn jsonl_writer_emits_one_line_per_row_with_a_trailing_newline() {
         let cols = [col("id", TypeClass::Int { bits: 32 })];
         let refs: Vec<&Column> = cols.iter().collect();
-        let mut w = Box::new(JsonlWriter::new(
-            "t.jsonl".into(),
-            refs,
-            JsonMode::Unroll,
-            false,
-        ));
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = Box::new(
+            JsonlWriter::new(dir.path(), "t.jsonl".into(), refs, JsonMode::Unroll, false).unwrap(),
+        );
         w.write_row(&[Value::Int(1)]).unwrap();
         w.write_row(&[Value::Int(2)]).unwrap();
         let out = w.finish().unwrap();
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].path, "t.jsonl");
-        assert_eq!(out[0].bytes, b"{\"id\":1}\n{\"id\":2}\n");
+        assert_eq!(out.paths, vec!["t.jsonl".to_string()]);
+        assert_eq!(
+            std::fs::read(dir.path().join("t.jsonl")).unwrap(),
+            b"{\"id\":1}\n{\"id\":2}\n"
+        );
     }
 
     #[test]
     fn a_table_with_no_rows_produces_an_empty_file() {
         let cols = [col("id", TypeClass::Int { bits: 32 })];
         let refs: Vec<&Column> = cols.iter().collect();
-        let w = Box::new(JsonlWriter::new(
-            "t.jsonl".into(),
-            refs,
-            JsonMode::Unroll,
-            false,
-        ));
-        let out = w.finish().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let w = Box::new(
+            JsonlWriter::new(dir.path(), "t.jsonl".into(), refs, JsonMode::Unroll, false).unwrap(),
+        );
+        w.finish().unwrap();
         assert!(
-            out[0].bytes.is_empty(),
+            std::fs::read(dir.path().join("t.jsonl"))
+                .unwrap()
+                .is_empty(),
             "an empty table must not emit a blank line"
         );
     }
@@ -1093,23 +1140,20 @@ mod tests {
         ];
         let table = table_with_pk(&["id"], &cols);
         let refs: Vec<&Column> = cols.iter().collect();
-        let mut w = Box::new(PerRowWriter::new(
-            "t".into(),
-            &table,
-            refs,
-            JsonMode::Unroll,
-            true,
-        ));
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = Box::new(
+            PerRowWriter::new(dir.path(), "t".into(), &table, refs, JsonMode::Unroll, true)
+                .unwrap(),
+        );
         w.write_row(&[
             Value::Text("Welcome Email".into()),
             Value::Text("hi".into()),
         ])
         .unwrap();
         let out = w.finish().unwrap();
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].path, "t/welcome-email.json");
+        assert_eq!(out.paths, vec!["t/welcome-email.json".to_string()]);
         assert_eq!(
-            String::from_utf8(out[0].bytes.clone()).unwrap(),
+            std::fs::read_to_string(dir.path().join("t/welcome-email.json")).unwrap(),
             "{\n  \"id\": \"Welcome Email\",\n  \"body\": \"hi\"\n}\n"
         );
     }
@@ -1119,18 +1163,23 @@ mod tests {
         let cols = vec![col("x", TypeClass::Int { bits: 32 })];
         let table = table_with_pk(&[], &cols);
         let refs: Vec<&Column> = cols.iter().collect();
-        let mut w = Box::new(PerRowWriter::new(
-            "t".into(),
-            &table,
-            refs,
-            JsonMode::Unroll,
-            false,
-        ));
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = Box::new(
+            PerRowWriter::new(
+                dir.path(),
+                "t".into(),
+                &table,
+                refs,
+                JsonMode::Unroll,
+                false,
+            )
+            .unwrap(),
+        );
         w.write_row(&[Value::Int(7)]).unwrap();
         w.write_row(&[Value::Int(8)]).unwrap();
         let out = w.finish().unwrap();
-        assert_eq!(out[0].path, "t/000000.json");
-        assert_eq!(out[1].path, "t/000001.json");
+        assert_eq!(out.paths[0], "t/000000.json");
+        assert_eq!(out.paths[1], "t/000001.json");
     }
 
     #[test]
@@ -1140,19 +1189,23 @@ mod tests {
         let cols = vec![col("id", TypeClass::Text { max_len: None })];
         let table = table_with_pk(&["id"], &cols);
         let refs: Vec<&Column> = cols.iter().collect();
-        let mut w = Box::new(PerRowWriter::new(
-            "t".into(),
-            &table,
-            refs,
-            JsonMode::Unroll,
-            false,
-        ));
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = Box::new(
+            PerRowWriter::new(
+                dir.path(),
+                "t".into(),
+                &table,
+                refs,
+                JsonMode::Unroll,
+                false,
+            )
+            .unwrap(),
+        );
         w.write_row(&[Value::Text("a/b".into())]).unwrap();
         w.write_row(&[Value::Text("a b".into())]).unwrap();
         w.write_row(&[Value::Text("a-b".into())]).unwrap();
         let out = w.finish().unwrap();
-        let paths: Vec<&str> = out.iter().map(|o| o.path.as_str()).collect();
-        assert_eq!(paths, ["t/a-b.json", "t/a-b-2.json", "t/a-b-3.json"]);
+        assert_eq!(out.paths, ["t/a-b.json", "t/a-b-2.json", "t/a-b-3.json"]);
     }
 
     #[test]
@@ -1163,14 +1216,78 @@ mod tests {
         ];
         let table = table_with_pk(&["a", "b"], &cols);
         let refs: Vec<&Column> = cols.iter().collect();
-        let mut w = Box::new(PerRowWriter::new(
-            "t".into(),
-            &table,
-            refs,
-            JsonMode::Unroll,
-            false,
-        ));
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = Box::new(
+            PerRowWriter::new(
+                dir.path(),
+                "t".into(),
+                &table,
+                refs,
+                JsonMode::Unroll,
+                false,
+            )
+            .unwrap(),
+        );
         w.write_row(&[Value::Int(1), Value::Int(2)]).unwrap();
-        assert_eq!(w.finish().unwrap()[0].path, "t/1-2.json");
+        assert_eq!(w.finish().unwrap().paths[0], "t/1-2.json");
+    }
+
+    #[test]
+    fn per_row_content_hash_is_order_independent_but_content_sensitive() {
+        // Files are written in row order but hashed in path order, so the fold
+        // has to sort. Losing that would make the recorded hash depend on which
+        // row happened to come first.
+        let cols = vec![col("id", TypeClass::Int { bits: 32 })];
+        let table = table_with_pk(&["id"], &cols);
+        let hash = |rows: &[i64]| {
+            let dir = tempfile::tempdir().unwrap();
+            let refs: Vec<&Column> = cols.iter().collect();
+            let mut w = Box::new(
+                PerRowWriter::new(
+                    dir.path(),
+                    "t".into(),
+                    &table,
+                    refs,
+                    JsonMode::Unroll,
+                    false,
+                )
+                .unwrap(),
+            );
+            for r in rows {
+                w.write_row(&[Value::Int(*r)]).unwrap();
+            }
+            w.finish().unwrap().sha256
+        };
+        assert_eq!(hash(&[1, 2]), hash(&[2, 1]));
+        assert_ne!(hash(&[1, 2]), hash(&[1, 3]));
+    }
+
+    #[test]
+    fn streamed_gzip_matches_the_buffered_encoder() {
+        // flate2's `flush` emits a sync marker that changes the bytes, so the
+        // streaming path must never call it.
+        let cols = [col("id", TypeClass::Int { bits: 32 })];
+        let refs: Vec<&Column> = cols.iter().collect();
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = Box::new(
+            JsonlWriter::new(
+                dir.path(),
+                "t.jsonl.gz".into(),
+                refs,
+                JsonMode::Unroll,
+                true,
+            )
+            .unwrap(),
+        );
+        for i in 1..=200 {
+            w.write_row(&[Value::Int(i)]).unwrap();
+        }
+        w.finish().unwrap();
+
+        let plain: String = (1..=200).map(|i| format!("{{\"id\":{i}}}\n")).collect();
+        assert_eq!(
+            std::fs::read(dir.path().join("t.jsonl.gz")).unwrap(),
+            crate::io::gzip(plain.as_bytes()).unwrap()
+        );
     }
 }
