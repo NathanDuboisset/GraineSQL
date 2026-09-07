@@ -279,6 +279,13 @@ pub struct LoadConfig {
     /// Default drift policy, overridable per table.
     #[serde(default = "default_on_drift")]
     pub on_drift: OnDrift,
+    /// Rows per multi-row INSERT. 1 restores one statement per row.
+    #[serde(default = "default_load_batch")]
+    pub batch: usize,
+}
+
+fn default_load_batch() -> usize {
+    500
 }
 
 fn default_on_drift() -> OnDrift {
@@ -299,6 +306,7 @@ impl Default for LoadConfig {
             transaction: true,
             fix_sequences: true,
             on_drift: default_on_drift(),
+            batch: default_load_batch(),
         }
     }
 }
@@ -489,6 +497,9 @@ impl Config {
         }
         if self.export.concurrency == 0 {
             bail!("export.concurrency must be at least 1");
+        }
+        if self.load.batch == 0 {
+            bail!("load.batch must be at least 1");
         }
 
         for (key, t) in &self.tables {

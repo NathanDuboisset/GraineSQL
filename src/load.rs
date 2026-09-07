@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
 
-use crate::config::{LoadMode, ResolvedTable};
+use crate::config::{Engine, LoadMode, ResolvedTable};
 use crate::db::PinnedConn;
 use crate::dialect::Dialect;
 use crate::schema::{Column, Schema, Table, TableId};
@@ -86,10 +86,6 @@ pub fn upsert_key(table: &Table, cfg: &ResolvedTable) -> Result<Vec<String>> {
 }
 
 /// Build the parameterised `INSERT` for one row.
-///
-/// One statement per row rather than a multi-row batch: it keeps the generated
-/// SQL identical for every row (so the server can reuse the plan), and it means
-/// an error message names the offending row instead of a batch of a hundred.
 pub fn insert_statement(
     dialect: &dyn Dialect,
     table: &Table,
@@ -97,15 +93,37 @@ pub fn insert_statement(
     key: &[String],
     mode: LoadMode,
 ) -> Result<String> {
+    insert_batch_statement(dialect, table, columns, key, mode, 1)
+}
+
+/// Build the parameterised `INSERT` for `rows` rows at once.
+///
+/// The parameter index runs across the whole statement, not per row: Postgres
+/// uses `$n` and SQLite `?n`, so reusing `?1` in a second tuple would bind the
+/// same value twice. MySQL's `?` ignores the index, so one rule covers all
+/// three. The conflict clause is appended once, after the last tuple.
+pub fn insert_batch_statement(
+    dialect: &dyn Dialect,
+    table: &Table,
+    columns: &[&Column],
+    key: &[String],
+    mode: LoadMode,
+    rows: usize,
+) -> Result<String> {
     let names: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
-    let placeholders: Vec<String> = columns
-        .iter()
-        .enumerate()
-        .map(|(i, c)| dialect.write_expr(c, i + 1))
+    let tuples: Vec<String> = (0..rows.max(1))
+        .map(|r| {
+            let placeholders: Vec<String> = columns
+                .iter()
+                .enumerate()
+                .map(|(i, c)| dialect.write_expr(c, r * columns.len() + i + 1))
+                .collect();
+            format!("({})", placeholders.join(", "))
+        })
         .collect();
 
     Ok(format!(
-        "{} {} ({}) VALUES ({}){}",
+        "{} {} ({}) VALUES {}{}",
         dialect.insert_verb(mode),
         dialect.quote_table(&table.id),
         names
@@ -113,9 +131,34 @@ pub fn insert_statement(
             .map(|n| dialect.quote_ident(n))
             .collect::<Vec<_>>()
             .join(", "),
-        placeholders.join(", "),
+        tuples.join(", "),
         dialect.conflict_clause(table, key, &names, mode)?
     ))
+}
+
+/// Rows per batch: the configured size, capped so the statement stays inside
+/// the engine's bind-parameter limit.
+pub fn rows_per_batch(engine: Engine, columns: usize, configured: usize) -> Result<usize> {
+    let cap = max_binds(engine);
+    if columns > cap {
+        bail!("a table with {columns} columns exceeds the {cap} bind parameters {engine:?} allows");
+    }
+    Ok(configured.min(cap / columns.max(1)).max(1))
+}
+
+/// Rows per `COPY` send. Bounds the payload held in memory at once.
+const COPY_CHUNK_ROWS: usize = 1_000;
+
+fn max_binds(engine: Engine) -> usize {
+    match engine.dialect() {
+        // The wire protocol counts parameters in a u16 on both.
+        Engine::Mysql => 65_535,
+        // SQLITE_MAX_VARIABLE_NUMBER is a compile-time limit, and only since
+        // 3.32 does it default to 32766. 999 is what an older build allows, and
+        // which build sqlx links is not ours to know.
+        Engine::Sqlite => 999,
+        _ => 65_535,
+    }
 }
 
 /// Check the rows against the live column definitions before writing anything.
@@ -228,6 +271,7 @@ pub async fn load_table(
     columns: &[&Column],
     rows: &[Vec<Value>],
     cfg: &ResolvedTable,
+    batch: usize,
 ) -> Result<TableResult> {
     let key = upsert_key(table, cfg)?;
 
@@ -237,13 +281,17 @@ pub async fn load_table(
         .then(|| dialect.copy_in_statement(table, columns))
         .flatten();
     if let Some(sql) = bulk {
-        let mut payload = crate::io::LineBuffer::new();
-        for row in rows {
-            let fields: Vec<String> = row.iter().map(crate::format::csv::encode_field).collect();
-            payload.push_line(&crate::format::csv::encode_record(&fields));
-        }
+        let chunks = rows.chunks(COPY_CHUNK_ROWS).map(|chunk| {
+            let mut payload = crate::io::LineBuffer::new();
+            for row in chunk {
+                let fields: Vec<String> =
+                    row.iter().map(crate::format::csv::encode_field).collect();
+                payload.push_line(&crate::format::csv::encode_record(&fields));
+            }
+            Ok(payload.finish())
+        });
         let affected = conn
-            .copy_in(&sql, &payload.finish())
+            .copy_in(&sql, chunks)
             .await
             .with_context(|| format!("bulk loading {}", cfg.id))?;
         return Ok(TableResult {
@@ -255,19 +303,72 @@ pub async fn load_table(
         });
     }
 
-    let sql = insert_statement(dialect, table, columns, &key, cfg.load_mode)?;
+    let per_batch = rows_per_batch(dialect.engine(), columns.len(), batch)?;
+    let single = insert_statement(dialect, table, columns, &key, cfg.load_mode)?;
+    // Exactly two statement texts per table, one full-size and one remainder,
+    // so sqlx's statement cache is not thrashed by a size that keeps changing.
+    let full = (per_batch > 1)
+        .then(|| insert_batch_statement(dialect, table, columns, &key, cfg.load_mode, per_batch))
+        .transpose()?;
+
     let mut affected = 0;
-    for (i, row) in rows.iter().enumerate() {
-        let binds: Vec<Option<String>> = columns
-            .iter()
-            .zip(row)
-            .map(|(col, v)| dialect.bind_text(col, v))
-            .collect::<Result<Vec<_>>>()
-            .with_context(|| format!("table {}: row {}", cfg.id, i + 1))?;
-        affected += conn
-            .execute_with(&sql, &binds)
-            .await
-            .with_context(|| format!("table {}: inserting row {}", cfg.id, i + 1))?;
+    for (chunk_no, chunk) in rows.chunks(per_batch).enumerate() {
+        let start = chunk_no * per_batch;
+        if chunk.len() == 1 || full.is_none() {
+            for (i, row) in chunk.iter().enumerate() {
+                affected +=
+                    insert_one(conn, dialect, columns, &single, row, cfg, start + i).await?;
+            }
+            continue;
+        }
+
+        let sql = if chunk.len() == per_batch {
+            full.clone().expect("checked above")
+        } else {
+            insert_batch_statement(dialect, table, columns, &key, cfg.load_mode, chunk.len())?
+        };
+        let mut binds = Vec::with_capacity(chunk.len() * columns.len());
+        for (i, row) in chunk.iter().enumerate() {
+            for (col, v) in columns.iter().zip(row) {
+                binds.push(
+                    dialect
+                        .bind_text(col, v)
+                        .with_context(|| format!("table {}: row {}", cfg.id, start + i + 1))?,
+                );
+            }
+        }
+
+        // A failed statement poisons the transaction on Postgres, so the
+        // row-by-row retry needs a savepoint to roll back to or it would fail
+        // with "current transaction is aborted" instead of naming the row.
+        conn.execute("SAVEPOINT graine_batch").await?;
+        match conn.execute_with(&sql, &binds).await {
+            Ok(n) => {
+                affected += n;
+                // Released every time: accumulated subtransactions cost
+                // Postgres an XID each, and past 64 it hits a performance cliff.
+                conn.execute("RELEASE SAVEPOINT graine_batch").await?;
+            }
+            Err(batch_err) => {
+                conn.execute("ROLLBACK TO SAVEPOINT graine_batch").await?;
+                let mut retried = 0;
+                for (i, row) in chunk.iter().enumerate() {
+                    retried +=
+                        insert_one(conn, dialect, columns, &single, row, cfg, start + i).await?;
+                }
+                conn.execute("RELEASE SAVEPOINT graine_batch").await?;
+                affected += retried;
+                // Row by row it went through, so the failure was a property of
+                // the batch: two rows colliding on a unique constraint that is
+                // not the conflict target, say.
+                tracing::warn!(
+                    "table {}: a batch of {} failed but its rows loaded individually \
+                     ({batch_err}); set `load.batch: 1` if this recurs",
+                    cfg.id,
+                    chunk.len()
+                );
+            }
+        }
     }
 
     Ok(TableResult {
@@ -277,6 +378,27 @@ pub async fn load_table(
         affected,
         deleted: 0,
     })
+}
+
+/// One row through the single-row statement, naming it if it fails.
+async fn insert_one(
+    conn: &mut PinnedConn<'_>,
+    dialect: &dyn Dialect,
+    columns: &[&Column],
+    sql: &str,
+    row: &[Value],
+    cfg: &ResolvedTable,
+    index: usize,
+) -> Result<u64> {
+    let binds: Vec<Option<String>> = columns
+        .iter()
+        .zip(row)
+        .map(|(col, v)| dialect.bind_text(col, v))
+        .collect::<Result<Vec<_>>>()
+        .with_context(|| format!("table {}: row {}", cfg.id, index + 1))?;
+    conn.execute_with(sql, &binds)
+        .await
+        .with_context(|| format!("table {}: inserting row {}", cfg.id, index + 1))
 }
 
 /// Columns whose MySQL `AUTO_INCREMENT` needs resetting after a load.
@@ -895,5 +1017,125 @@ mod tests {
     #[test]
     fn an_empty_plan_says_so() {
         assert_eq!(render_plan("dev", &[]), "nothing to load\n");
+    }
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+    use crate::config::{Engine, Format, JsonMode, Layout, OnDrift};
+    use crate::dialect::{Mysql, Postgres, Sqlite};
+    use crate::schema::{TypeClass, UniqueKey};
+
+    fn cols() -> Vec<Column> {
+        ["a", "b"]
+            .iter()
+            .map(|n| Column {
+                name: (*n).into(),
+                sql_type: "text".into(),
+                class: TypeClass::Text { max_len: None },
+                nullable: true,
+                has_default: false,
+                generated: false,
+                identity: false,
+            })
+            .collect()
+    }
+
+    fn t() -> Table {
+        Table {
+            id: TableId::new("public", "t"),
+            columns: cols(),
+            primary_key: vec!["a".into()],
+            unique: vec![UniqueKey::total(vec!["b".into()])],
+            foreign_keys: vec![],
+        }
+    }
+
+    fn cfg() -> ResolvedTable {
+        ResolvedTable {
+            id: TableId::new("public", "t"),
+            config_key: "t".into(),
+            filter: None,
+            order_by: vec![],
+            limit: None,
+            columns: None,
+            exclude_columns: vec![],
+            format: Format::Jsonl,
+            layout: Layout::Single,
+            pretty: false,
+            json: JsonMode::Unroll,
+            load_mode: LoadMode::Insert,
+            key: None,
+            on_drift: OnDrift::Confirm,
+        }
+    }
+
+    fn stmt(d: &dyn Dialect, rows: usize) -> String {
+        let table = t();
+        let cols = cols();
+        let refs: Vec<&Column> = cols.iter().collect();
+        let _ = cfg();
+        insert_batch_statement(d, &table, &refs, &["a".into()], LoadMode::Insert, rows).unwrap()
+    }
+
+    #[test]
+    fn placeholders_keep_counting_across_tuples() {
+        // Reusing $1/?1 in a second tuple would bind the same value twice.
+        assert!(
+            stmt(&Postgres, 2).ends_with(
+                "VALUES (CAST($1 AS text), CAST($2 AS text)), (CAST($3 AS text), CAST($4 AS text))"
+            ),
+            "{}",
+            stmt(&Postgres, 2)
+        );
+        assert!(
+            stmt(&Sqlite, 2).ends_with("VALUES (?1, ?2), (?3, ?4)"),
+            "{}",
+            stmt(&Sqlite, 2)
+        );
+        // MySQL's `?` carries no index, so the same rule yields correct SQL.
+        assert!(
+            stmt(&Mysql, 2).ends_with("VALUES (?, ?), (?, ?)"),
+            "{}",
+            stmt(&Mysql, 2)
+        );
+    }
+
+    #[test]
+    fn a_single_row_batch_matches_the_single_row_statement() {
+        let table = t();
+        let cols = cols();
+        let refs: Vec<&Column> = cols.iter().collect();
+        assert_eq!(
+            insert_statement(&Postgres, &table, &refs, &["a".into()], LoadMode::Insert).unwrap(),
+            stmt(&Postgres, 1)
+        );
+    }
+
+    #[test]
+    fn the_conflict_clause_appears_once_after_the_last_tuple() {
+        let table = t();
+        let cols = cols();
+        let refs: Vec<&Column> = cols.iter().collect();
+        let sql =
+            insert_batch_statement(&Postgres, &table, &refs, &["a".into()], LoadMode::Upsert, 3)
+                .unwrap();
+        assert_eq!(sql.matches("ON CONFLICT").count(), 1, "{sql}");
+        assert!(
+            sql.find("ON CONFLICT").unwrap() > sql.rfind("), (").unwrap(),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn batch_size_stays_inside_the_engines_parameter_cap() {
+        // SQLite's 999 is the binding constraint at 20 columns.
+        assert_eq!(rows_per_batch(Engine::Sqlite, 20, 500).unwrap(), 49);
+        assert_eq!(rows_per_batch(Engine::Postgres, 20, 500).unwrap(), 500);
+        // Never zero, however wide the table.
+        assert_eq!(rows_per_batch(Engine::Sqlite, 900, 500).unwrap(), 1);
+        // And a table wider than the cap cannot be loaded at all.
+        assert!(rows_per_batch(Engine::Sqlite, 1_000, 500).is_err());
     }
 }

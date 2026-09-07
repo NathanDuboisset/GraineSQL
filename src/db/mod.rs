@@ -554,11 +554,22 @@ impl PinnedConn<'_> {
     ///
     /// Postgres only; the other engines have no equivalent that works over a
     /// pooled connection without server-side file access.
-    pub async fn copy_in(&mut self, sql: &str, data: &[u8]) -> Result<u64> {
+    /// Stream a CSV payload into `COPY ... FROM STDIN`.
+    ///
+    /// `chunks` is pulled lazily so the whole payload is never in memory at
+    /// once, which for a large table is the entire point of streaming.
+    pub async fn copy_in<I>(&mut self, sql: &str, chunks: I) -> Result<u64>
+    where
+        I: IntoIterator<Item = Result<Vec<u8>>>,
+    {
         match self {
             PinnedConn::Pg(c) => {
                 let mut sink = c.copy_in_raw(sql).await.with_context(|| failed_sql(sql))?;
-                sink.send(data).await.context("sending the copy stream")?;
+                for chunk in chunks {
+                    sink.send(chunk?.as_slice())
+                        .await
+                        .context("sending the copy stream")?;
+                }
                 sink.finish().await.with_context(|| failed_sql(sql))
             }
             _ => bail!("this engine has no COPY FROM STDIN"),

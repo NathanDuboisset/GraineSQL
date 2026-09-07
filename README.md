@@ -77,11 +77,14 @@ export:
   json: unroll                   # nest json columns instead of escaping them
   sql_batch: 100                 # rows per INSERT when format: sql
   concurrency: 4                 # tables exported at once; cannot affect output
+  follow_parents: false          # pull in parent rows a `where` would orphan
 
 load:
   default: upsert                # upsert | insert | skip_existing | truncate_first
   transaction: true
   fix_sequences: true
+  batch: 500                     # rows per multi-row INSERT; 1 = one per row
+  on_drift: confirm              # abort | confirm | ignore, overridable per table
 
 tables:                          # ONLY these tables are ever touched
   countries: {}
@@ -95,6 +98,8 @@ tables:                          # ONLY these tables are ever touched
   orders:
     where: "status <> 'draft'"
     load: insert
+  sessions:
+    on_drift: ignore             # volatile; never ask about its schema
   settings:
     load: truncate_first
   templates:
@@ -104,7 +109,7 @@ tables:                          # ONLY these tables are ever touched
 ```
 
 Per-table keys: `where`, `order_by`, `limit`, `columns`, `exclude_columns`,
-`format`, `layout`, `pretty`, `json`, `load`, `key`.
+`format`, `layout`, `pretty`, `json`, `load`, `key`, `on_drift`.
 
 ### Sources
 
@@ -144,8 +149,10 @@ the key in `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_SECRET_KEY` or
 | `graine lock` | Introspect and write `graine.lock` |
 | `graine lock --check` | Exit non-zero if the live schema differs. The CI gate |
 | `graine diff` | Show the drift, classified by severity |
+| `graine diff --data` | Show which rows a load would add, change or remove |
 | `graine status` | Whether the seed files are current: drift plus row counts |
 | `graine export` | Pull rows and buckets into seed files |
+| `graine export --follow-parents` | The same, pulling in parent rows a filter orphans |
 | `graine plan` | Load order, row counts, per-table action. Writes nothing |
 | `graine plan --tree` | The same, drawn as a dependency tree |
 | `graine load` | Push seed files into a database |
@@ -190,7 +197,28 @@ error: the export is not referentially complete:
     widen the filter on public.users, or narrow the one on public.orders
 ```
 
-`--no-fk-check` skips it.
+`--no-fk-check` skips it. `--follow-parents` fixes it instead: it walks the
+foreign-key graph and pulls in the missing parent rows, widening that parent's
+own `where` where it has to, and says which tables gained rows. Off by default,
+since it overrides a filter you wrote deliberately.
+
+### Schema drift you have already accepted
+
+A change that only loses data prompts rather than aborting, and the prompt has a
+third answer: accept and stop asking about this table. That is recorded in
+`graine.lock`, so it is committed and reviewed like any other decision rather
+than living in one developer's home directory.
+
+```
+public.orders.legacy_ref: column dropped (was text).
+  [y] accept once  [n] refuse  [a] accept and remember for orders
+```
+
+`graine diff` lists what is remembered; `graine diff --forget orders` drops it.
+`--yes` accepts without remembering, since it is a CI switch rather than a
+decision. For a table whose schema churns constantly, `on_drift: ignore` is
+better than answering every time, and better than `--force`, which would
+disable the check everywhere.
 
 ## Storage buckets
 
@@ -356,7 +384,16 @@ After loading a serial/identity key, the sequence is advanced past the loaded
 rows, so the application's next insert does not collide.
 
 Confirmation is required when the target is not local or the plan destroys rows.
-`--yes` skips it, `--dry-run` does everything except commit.
+`--yes` skips it, `--dry-run` shows the row-level diff and commits nothing.
+
+Rows go in as multi-row `INSERT`s, `load.batch` at a time, on every engine and in
+every mode. The size is capped per engine so a statement stays inside the
+bind-parameter limit, which on SQLite is the binding constraint for wide tables.
+Postgres keeps `COPY` for `insert` and `truncate_first`, being faster still;
+`upsert` and `skip_existing` cannot use it, having nowhere to put a conflict
+clause. If a batch fails, its rows are replayed one at a time so the error names
+the offending row rather than a batch of five hundred; `load.batch: 1` restores
+that precision everywhere.
 
 Foreign-key cycles are detected and named. Postgres can load one only when every
 constraint in it is `DEFERRABLE`, in which case GraineSQL defers them for the
@@ -395,6 +432,10 @@ decoder at once and fails on any asymmetry between them.
   checks (duplicate keys, nulls in NOT NULL columns) need the whole file before
   the transaction opens — and failing before it opens is the point.
 - `.sql` output cannot be read back.
+- MySQL uses multi-row `INSERT` rather than `LOAD DATA LOCAL INFILE`. sqlx does
+  not negotiate the `LOCAL_FILES` capability and leaves the server's
+  `LocalInfileRequest` packet unhandled, and the server side needs
+  `local_infile=1`, which most managed MySQL does not allow.
 - Bucket objects are held in memory one at a time while hashing, so
   `max_object_bytes` (default 25 MiB) guards against pulling something into git
   that does not belong there.

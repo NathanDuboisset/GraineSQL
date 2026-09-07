@@ -1099,7 +1099,17 @@ pub async fn cmd_load(
         let id = live.resolve(&cfg.id).unwrap_or_else(|| cfg.id.clone());
         let Some(table) = live.get(&id) else { continue };
         let columns = export::selected_columns(table, cfg)?;
-        match load::load_table(&mut conn, db.dialect(), table, &columns, rows, cfg).await {
+        match load::load_table(
+            &mut conn,
+            db.dialect(),
+            table,
+            &columns,
+            rows,
+            cfg,
+            ctx.cfg.load.batch,
+        )
+        .await
+        {
             Ok(mut r) => {
                 r.deleted = deleted_counts.get(&r.table).copied().unwrap_or(0);
                 ctx.detail(format!(
