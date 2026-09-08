@@ -145,6 +145,7 @@ the key in `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_SECRET_KEY` or
 |---|---|
 | `graine init` | Write a starter config, optionally pre-filled from a live database |
 | `graine add TABLE...` | Append tables to the config, with the parents they need |
+| `graine add TABLE... --with-children` | The same, plus the tables that hang off them |
 | `graine sources` | List sources, resolve credentials, check connectivity |
 | `graine lock` | Introspect and write `graine.lock` |
 | `graine lock --check` | Exit non-zero if the live schema differs. The CI gate |
@@ -162,6 +163,25 @@ the key in `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_SECRET_KEY` or
 Global flags: `--config`, `--source`, `--json`, `-v`, `-q`, `-y`.
 `--tables a,b` narrows `export`, `plan` and `load`; `--buckets a,b` and
 `--no-buckets` do the same for storage.
+
+`add` reports how each table arrived:
+
+```
+$ graine add orgs --with-children
+added 5 tables to graine.yaml
+  named     orgs
+  children  users, memberships, orders  (2 levels deep)
+  parents   plans  (needed to load the above)
+```
+
+The parents make a slice loadable; the children make it useful. Downward is the
+unbounded direction, though — a couple of hops off a central table can reach most
+of a schema — so `--depth N` bounds it, and a walk that adds a lot of tables
+shows the list and asks first.
+
+A long `export` draws a progress line on stderr, on a terminal only: `-v` prints
+a scrolling line per table instead, and under `--json`, `-q`, or any non-terminal
+stderr nothing is drawn at all, so CI logs and piped output stay clean.
 
 ```
 $ graine plan --tree

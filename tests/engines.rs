@@ -216,6 +216,59 @@ fn add_can_skip_the_parents() {
     assert!(!cfg.contains("orgs:"), "{cfg}");
 }
 
+/// A config with an empty `tables:` block, ready for `add`.
+fn empty_config(s: &Sqlite) {
+    std::fs::write(
+        s.dir.path().join("graine.yaml"),
+        "version: 1\n\
+         sources:\n  dev: {engine: sqlite, url: \"sqlite://src.db\", default: true}\n\
+         tables: {}\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn add_with_children_pulls_the_tables_that_hang_off_one() {
+    let s = Sqlite::new("");
+    empty_config(&s);
+
+    let out = s.ok(&["add", "orgs", "--with-children"]);
+    assert!(out.contains("children"), "{out}");
+    let cfg = std::fs::read_to_string(s.dir.path().join("graine.yaml")).unwrap();
+    assert!(cfg.contains("users:"), "users hangs off orgs:\n{cfg}");
+
+    s.ok(&["lock", "-q"]);
+    s.ok(&["export", "-q"]);
+}
+
+#[test]
+fn add_depth_bounds_the_child_walk() {
+    let s = Sqlite::new("");
+    empty_config(&s);
+    // employees references only itself, so depth cannot reach past users.
+    s.ok(&["add", "orgs", "--with-children", "--depth", "1"]);
+    let cfg = std::fs::read_to_string(s.dir.path().join("graine.yaml")).unwrap();
+    assert!(cfg.contains("users:"), "{cfg}");
+    assert!(!cfg.contains("employees:"), "{cfg}");
+}
+
+#[test]
+fn add_reports_how_each_table_arrived() {
+    let s = Sqlite::new("");
+    empty_config(&s);
+    let out = s.ok(&["add", "users", "--with-children", "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&out).expect("json output");
+    let added = v["added"].as_array().unwrap();
+    let via = |t: &str| {
+        added
+            .iter()
+            .find(|a| a["table"] == t)
+            .map(|a| a["via"].as_str().unwrap().to_string())
+    };
+    assert_eq!(via("users").as_deref(), Some("named"));
+    assert_eq!(via("orgs").as_deref(), Some("parent"));
+}
+
 #[test]
 fn status_reports_whether_the_seed_is_current() {
     let s = Sqlite::new("  orgs: {}\n  users: {}\n  employees: {}\n");

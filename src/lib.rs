@@ -14,6 +14,7 @@ pub mod io;
 pub mod load;
 pub mod lock;
 pub mod order;
+pub mod progress;
 pub mod schema;
 pub mod source;
 pub mod storage;

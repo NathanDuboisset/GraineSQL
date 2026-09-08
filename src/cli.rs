@@ -66,6 +66,14 @@ pub enum Command {
         /// Add only what was named, without the foreign-key parents it needs.
         #[arg(long)]
         no_parents: bool,
+
+        /// Also add the tables that hang off the named ones.
+        #[arg(long)]
+        with_children: bool,
+
+        /// Bound the child walk. Unbounded by default.
+        #[arg(long, requires = "with_children")]
+        depth: Option<usize>,
     },
 
     /// Summarise whether the seed files are current against a database.

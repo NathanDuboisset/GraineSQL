@@ -417,6 +417,7 @@ pub fn total_order(table: &Table, columns: &[&Column], cfg: &ResolvedTable) -> V
 }
 
 /// Export one table.
+#[allow(clippy::too_many_arguments)]
 pub async fn export_table(
     db: &Db,
     schema: &Schema,
@@ -425,6 +426,7 @@ pub async fn export_table(
     index: &[Vec<String>],
     pulled: Option<&std::collections::BTreeSet<Vec<String>>>,
     out_dir: &Path,
+    mut tick: impl FnMut(u64),
 ) -> Result<TableExport> {
     let id = schema.resolve(&cfg.id).unwrap_or_else(|| cfg.id.clone());
     let table = schema
@@ -515,6 +517,7 @@ pub async fn export_table(
         }
         writer.write_row(&values)?;
         rows += 1;
+        tick(rows);
         Ok(())
     })
     .await

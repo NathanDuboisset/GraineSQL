@@ -763,9 +763,13 @@ pub async fn cmd_export(
         crate::closure::Pulled::new()
     };
 
+    let mut progress = crate::progress::Progress::new(ctx, ordered.len());
+
     for cfg in &ordered {
         let id = live.resolve(&cfg.id).unwrap_or_else(|| cfg.id.clone());
         let index = to_index.get(&id).cloned().unwrap_or_default();
+        progress.step(&id.to_string());
+        let ticker = std::cell::RefCell::new(&mut progress);
         let exported = export::export_table(
             &db,
             &live,
@@ -774,9 +778,17 @@ pub async fn cmd_export(
             &index,
             pulled.get(&id),
             &out_dir,
+            |rows| ticker.borrow_mut().rows(rows),
         )
         .await?;
-        ctx.detail(format!("  {} -> {}", cfg.id, exported.paths.join(", ")));
+        ctx.detail(format!(
+            "  [{}/{}] {} -> {} ({} rows)",
+            written.len() + 1,
+            ordered.len(),
+            cfg.id,
+            exported.paths.join(", "),
+            exported.rows
+        ));
         written.extend(exported.paths.iter().map(|p| out_dir.join(p)));
         total_rows += exported.rows;
 
@@ -795,6 +807,7 @@ pub async fn cmd_export(
         }));
         exports.insert(exported.table.clone(), exported);
     }
+    progress.clear();
 
     // A set of per-table filters can easily orphan rows. Loading that into an
     // empty database fails partway through, so say so now instead.
@@ -1438,7 +1451,12 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
     let ctx = Ctx::new(&cli)?;
     match cli.command {
         Command::Init { .. } | Command::Completions { .. } => unreachable!("handled above"),
-        Command::Add { tables, no_parents } => cmd_add(&ctx, tables, no_parents).await,
+        Command::Add {
+            tables,
+            no_parents,
+            with_children,
+            depth,
+        } => cmd_add(&ctx, tables, no_parents, with_children, depth).await,
         Command::Status => cmd_status(&ctx).await,
         Command::Sources { no_connect } => cmd_sources(&ctx, no_connect).await,
         Command::Lock { check } => cmd_lock(&ctx, check).await,

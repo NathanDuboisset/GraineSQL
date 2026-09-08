@@ -1,5 +1,6 @@
 //! Commands that set a project up rather than move data.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
@@ -9,7 +10,7 @@ use crate::commands::{Ctx, introspect};
 use crate::config::Engine;
 use crate::db::{self, Db};
 use crate::lock::{Lock, drift};
-use crate::schema::TableId;
+use crate::schema::{Schema, TableId};
 use crate::source::ResolvedSource;
 
 pub async fn cmd_init(cli: &Cli, url: Option<String>, force: bool) -> Result<()> {
@@ -88,8 +89,41 @@ pub async fn cmd_init(cli: &Cli, url: Option<String>, force: bool) -> Result<()>
     Ok(())
 }
 
-/// Append tables to the config, with the parents they need to load.
-pub async fn cmd_add(ctx: &Ctx, wanted: Vec<String>, no_parents: bool) -> Result<()> {
+/// Why a table ended up in the list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Provenance {
+    Named,
+    Child(usize),
+    Parent,
+}
+
+/// Parent -> the tables whose foreign keys point at it.
+fn child_index(schema: &Schema) -> BTreeMap<TableId, Vec<TableId>> {
+    let mut out: BTreeMap<TableId, Vec<TableId>> = BTreeMap::new();
+    for (id, table) in &schema.tables {
+        for fk in &table.foreign_keys {
+            if let Some(parent) = schema.resolve(&fk.references)
+                && parent != *id
+            {
+                out.entry(parent).or_default().push(id.clone());
+            }
+        }
+    }
+    for v in out.values_mut() {
+        v.sort();
+        v.dedup();
+    }
+    out
+}
+
+/// Append tables to the config, with the relatives they need to load.
+pub async fn cmd_add(
+    ctx: &Ctx,
+    wanted: Vec<String>,
+    no_parents: bool,
+    with_children: bool,
+    depth: Option<usize>,
+) -> Result<()> {
     let (_src, db) = ctx.connect(1).await?;
     let full = db::introspect(&db).await?;
 
@@ -109,26 +143,51 @@ pub async fn cmd_add(ctx: &Ctx, wanted: Vec<String>, no_parents: bool) -> Result
         }
     }
 
-    // Walk the foreign keys so the added slice can actually load.
-    let mut needed: Vec<TableId> = Vec::new();
-    let mut queue = resolved.clone();
-    while let Some(id) = queue.pop() {
-        if needed.contains(&id) {
-            continue;
+    let mut how: BTreeMap<TableId, Provenance> = resolved
+        .iter()
+        .map(|id| (id.clone(), Provenance::Named))
+        .collect();
+
+    // Children first, then parents over the result: a child usually references
+    // other tables too, and only the second pass brings those along.
+    if with_children {
+        let children = child_index(&full);
+        let mut frontier = resolved.clone();
+        for level in 1..=depth.unwrap_or(usize::MAX) {
+            let mut next = Vec::new();
+            for id in &frontier {
+                for child in children.get(id).into_iter().flatten() {
+                    if let std::collections::btree_map::Entry::Vacant(e) = how.entry(child.clone())
+                    {
+                        e.insert(Provenance::Child(level));
+                        next.push(child.clone());
+                    }
+                }
+            }
+            if next.is_empty() {
+                break;
+            }
+            frontier = next;
         }
-        needed.push(id.clone());
-        if no_parents {
-            continue;
-        }
-        if let Some(table) = full.get(&id) {
+    }
+
+    if !no_parents {
+        let mut queue: Vec<TableId> = how.keys().cloned().collect();
+        while let Some(id) = queue.pop() {
+            let Some(table) = full.get(&id) else { continue };
             for fk in &table.foreign_keys {
-                if let Some(parent) = full.resolve(&fk.references) {
+                let Some(parent) = full.resolve(&fk.references) else {
+                    continue;
+                };
+                if let std::collections::btree_map::Entry::Vacant(e) = how.entry(parent.clone()) {
+                    e.insert(Provenance::Parent);
                     queue.push(parent);
                 }
             }
         }
     }
-    needed.sort();
+
+    let needed: Vec<TableId> = how.keys().cloned().collect();
 
     let existing: Vec<TableId> = ctx
         .cfg
@@ -149,6 +208,21 @@ pub async fn cmd_add(ctx: &Ctx, wanted: Vec<String>, no_parents: bool) -> Result
     if new.is_empty() {
         ctx.say("already in the config; nothing to add");
         return Ok(());
+    }
+
+    // Downward is the dangerous direction: in most schemas a couple of hops off
+    // a central table reaches nearly everything, which is the failure `add`
+    // exists to prevent. Show the list and ask before writing it.
+    let children = new
+        .iter()
+        .filter(|n| matches!(by_stem(&how, &full, n), Some(Provenance::Child(_))))
+        .count();
+    if with_children && (children > 10 || children > 3 * wanted.len()) {
+        ctx.say(render_provenance(&how, &full, &new));
+        if !ctx.confirm(&format!("this adds {} tables. Continue?", new.len()))? {
+            ctx.say("nothing was added");
+            return Ok(());
+        }
     }
 
     let path = ctx.cfg.base_dir.join(crate::config::CONFIG_FILENAME);
@@ -173,21 +247,102 @@ pub async fn cmd_add(ctx: &Ctx, wanted: Vec<String>, no_parents: bool) -> Result
     }
     crate::io::write_atomic(&path, text.as_bytes())?;
 
-    let pulled: Vec<&String> = new.iter().filter(|n| !wanted.contains(n)).collect();
-    ctx.say(format!("added {} to {}", new.join(", "), path.display()));
-    if !pulled.is_empty() {
+    if ctx.json {
+        let items: Vec<serde_json::Value> = new
+            .iter()
+            .map(|n| match by_stem(&how, &full, n) {
+                Some(Provenance::Child(d)) => {
+                    serde_json::json!({"table": n, "via": "child", "depth": d})
+                }
+                Some(Provenance::Parent) => serde_json::json!({"table": n, "via": "parent"}),
+                _ => serde_json::json!({"table": n, "via": "named"}),
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "path": path.display().to_string(),
+                "added": items,
+            }))?
+        );
+        return Ok(());
+    }
+
+    ctx.say(format!("added {} tables to {}", new.len(), path.display()));
+    ctx.say(render_provenance(&how, &full, &new));
+
+    // `add` works at table granularity; the referential check works at row
+    // granularity, so a pre-existing filter can still orphan the new rows.
+    let filtered: Vec<String> = ctx
+        .cfg
+        .resolved_tables()?
+        .into_iter()
+        .filter(|t| t.filter.is_some() || t.limit.is_some())
+        .filter(|t| {
+            full.resolve(&t.id).is_some_and(|id| {
+                child_index(&full).get(&id).is_some_and(|kids| {
+                    kids.iter()
+                        .any(|k| new.contains(&k.file_stem(&full.default_schema)))
+                })
+            })
+        })
+        .map(|t| t.config_key)
+        .collect();
+    if !filtered.is_empty() {
         ctx.say(format!(
-            "{} came along as foreign-key parent{}",
-            pulled
-                .iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join(", "),
-            if pulled.len() == 1 { "" } else { "s" }
+            "note: {} {} a filter, and the new tables reference {}; \
+             `graine export` will check that every reference resolves",
+            filtered.join(", "),
+            if filtered.len() == 1 { "has" } else { "have" },
+            if filtered.len() == 1 { "it" } else { "them" }
         ));
     }
+
     ctx.say("run `graine lock` to record the schema");
     Ok(())
+}
+
+fn by_stem(how: &BTreeMap<TableId, Provenance>, schema: &Schema, stem: &str) -> Option<Provenance> {
+    how.iter()
+        .find(|(id, _)| id.file_stem(&schema.default_schema) == stem)
+        .map(|(_, p)| *p)
+}
+
+fn render_provenance(
+    how: &BTreeMap<TableId, Provenance>,
+    schema: &Schema,
+    new: &[String],
+) -> String {
+    let pick = |want: fn(&Provenance) -> bool| -> Vec<&str> {
+        new.iter()
+            .filter(|n| by_stem(how, schema, n).as_ref().is_some_and(want))
+            .map(|n| n.as_str())
+            .collect()
+    };
+    let named = pick(|p| matches!(p, Provenance::Named));
+    let kids = pick(|p| matches!(p, Provenance::Child(_)));
+    let parents = pick(|p| matches!(p, Provenance::Parent));
+
+    let deepest = new
+        .iter()
+        .filter_map(|n| match by_stem(how, schema, n) {
+            Some(Provenance::Child(d)) => Some(d),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+
+    let mut out = String::new();
+    for (label, group, suffix) in [
+        ("named", named, String::new()),
+        ("children", kids, format!("  ({deepest} level deep)")),
+        ("parents", parents, "  (needed to load the above)".into()),
+    ] {
+        if !group.is_empty() {
+            out.push_str(&format!("  {label:<9} {}{suffix}\n", group.join(", ")));
+        }
+    }
+    out.trim_end().to_string()
 }
 
 /// One answer to "is my seed data current against this database".
