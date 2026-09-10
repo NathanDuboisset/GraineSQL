@@ -87,11 +87,23 @@ impl<'a> Fields<'a> {
 
 /// Introspect the live schema. The single dispatch point per engine.
 pub async fn introspect(db: &Db) -> Result<Schema> {
-    match db.engine().dialect() {
+    let mut schema = match db.engine().dialect() {
         Engine::Mysql => mysql::introspect(db).await,
         Engine::Sqlite => sqlite::introspect(db).await,
         _ => postgres::introspect(db).await,
+    }?;
+
+    // A primary key column is NOT NULL whatever the catalog says. SQLite only
+    // enforces that for an INTEGER PRIMARY KEY, so without this a lock taken
+    // there claims every other key column is nullable and reads as breaking
+    // drift against any engine that does enforce it.
+    for table in schema.tables.values_mut() {
+        let pk = table.primary_key.clone();
+        for col in table.columns.iter_mut().filter(|c| pk.contains(&c.name)) {
+            col.nullable = false;
+        }
     }
+    Ok(schema)
 }
 
 /// Every user table, for `graine init` and `graine add`.

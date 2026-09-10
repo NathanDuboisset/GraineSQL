@@ -223,7 +223,13 @@ pub fn classify(locked: &Schema, live: &Schema) -> Report {
                 note: "its seed rows will be discarded".into(),
             }),
             Some(live_table) => {
-                compare_table(id, locked_table, live_table, &mut drifts);
+                compare_table(
+                    id,
+                    locked_table,
+                    live_table,
+                    Some((locked, live)),
+                    &mut drifts,
+                );
             }
         }
     }
@@ -255,7 +261,13 @@ pub fn classify(locked: &Schema, live: &Schema) -> Report {
     Report { drifts }
 }
 
-fn compare_table(id: &TableId, locked: &Table, live: &Table, out: &mut Vec<Drift>) {
+fn compare_table(
+    id: &TableId,
+    locked: &Table,
+    live: &Table,
+    schemas: Option<(&Schema, &Schema)>,
+    out: &mut Vec<Drift>,
+) {
     for lc in &locked.columns {
         match live.column(&lc.name) {
             None => out.push(Drift {
@@ -266,7 +278,7 @@ fn compare_table(id: &TableId, locked: &Table, live: &Table, out: &mut Vec<Drift
                 what: format!("column dropped (was {})", lc.class.label()),
                 note: "the seed files carry data for it, which will be discarded".into(),
             }),
-            Some(vc) => compare_column(id, lc, vc, out),
+            Some(vc) => compare_column(id, lc, vc, schemas, out),
         }
     }
 
@@ -339,21 +351,45 @@ fn compare_table(id: &TableId, locked: &Table, live: &Table, out: &mut Vec<Drift
     compare_foreign_keys(id, locked, live, out);
 }
 
-fn compare_column(id: &TableId, locked: &Column, live: &Column, out: &mut Vec<Drift>) {
-    if locked.class != live.class {
+fn compare_column(
+    id: &TableId,
+    locked: &Column,
+    live: &Column,
+    schemas: Option<(&Schema, &Schema)>,
+    out: &mut Vec<Drift>,
+) {
+    // Two enums accepting the same labels are the same type, whatever each
+    // engine chose to call it.
+    let same_enum = schemas.is_some_and(|(l, v)| {
+        match (enum_labels(l, &locked.class), enum_labels(v, &live.class)) {
+            (Some(a), Some(b)) => set_of(a) == set_of(b),
+            _ => false,
+        }
+    });
+
+    if locked.class != live.class && !same_enum {
         let widens = locked.class.widens_to(&live.class);
+        // A narrower text column is checked value by value before the
+        // transaction opens, and the error names the row, so it need not abort
+        // here. Every other narrowing can still fail mid-load.
+        let checked = matches!(
+            (&locked.class, &live.class),
+            (TypeClass::Text { .. }, TypeClass::Text { .. })
+        );
         out.push(Drift {
-            severity: if widens {
-                Severity::Benign
-            } else {
-                Severity::Breaking
+            severity: match (widens, checked) {
+                (true, _) => Severity::Benign,
+                (false, true) => Severity::Confirm,
+                (false, false) => Severity::Breaking,
             },
             target: Target::Column(id.clone(), locked.name.clone()),
             what: format!("{} -> {}", locked.class.label(), live.class.label()),
-            note: if widens {
-                String::new()
-            } else {
-                "existing seed values may not fit or may fail to parse".into()
+            note: match (widens, checked) {
+                (true, _) => String::new(),
+                (false, true) => {
+                    "any row too long for it is named before anything is written".into()
+                }
+                (false, false) => "existing seed values may not fit or may fail to parse".into(),
             },
         });
     }
@@ -444,9 +480,23 @@ fn compare_foreign_keys(id: &TableId, locked: &Table, live: &Table, out: &mut Ve
     }
 }
 
+/// The labels an enum class accepts, by whatever name the engine gave it.
+fn enum_labels<'a>(schema: &'a Schema, class: &TypeClass) -> Option<&'a Vec<String>> {
+    match class {
+        TypeClass::Enum { name } => schema.enums.get(name),
+        _ => None,
+    }
+}
+
 fn compare_enums(locked: &Schema, live: &Schema, out: &mut Vec<Drift>) {
     for (name, locked_labels) in &locked.enums {
-        let Some(live_labels) = live.enums.get(name) else {
+        // Matched by labels, not by name: MySQL has no named enum types, so the
+        // same set of labels arrives under the declaration text instead.
+        let by_labels = live
+            .enums
+            .values()
+            .find(|l| set_of(l) == set_of(locked_labels));
+        let Some(live_labels) = live.enums.get(name).or(by_labels) else {
             // The type is gone entirely; the column type change already reports
             // this, so do not double-report unless no column mentions it.
             if !any_column_uses_enum(locked, name) {
@@ -484,6 +534,10 @@ fn compare_enums(locked: &Schema, live: &Schema, out: &mut Vec<Drift>) {
             }
         }
     }
+}
+
+fn set_of(labels: &[String]) -> BTreeSet<&String> {
+    labels.iter().collect()
 }
 
 fn any_column_uses_enum(schema: &Schema, name: &str) -> bool {
@@ -740,12 +794,52 @@ mod tests {
     }
 
     #[test]
-    fn shortening_a_varchar_is_breaking() {
+    fn shortening_a_varchar_prompts_rather_than_aborting() {
+        // `load::validate_rows` measures every value against the new width
+        // before the transaction opens and names any row that will not fit, so
+        // this cannot fail halfway through a load.
         let r = drift_from(|s| {
             users(s).columns[1].class = TypeClass::Text { max_len: Some(20) };
         });
-        assert_eq!(only(&r).severity, Severity::Breaking);
+        assert_eq!(only(&r).severity, Severity::Confirm);
         assert_eq!(only(&r).what, "varchar(100) -> varchar(20)");
+    }
+
+    #[test]
+    fn two_enums_with_the_same_labels_are_the_same_type() {
+        // Postgres names its enum types; MySQL inlines the declaration. A lock
+        // taken from one has to be usable against the other.
+        let mut locked = base();
+        locked.enums.insert(
+            "tier".into(),
+            vec!["free".into(), "pro".into(), "team".into()],
+        );
+        users(&mut locked).columns.push(Column {
+            name: "plan".into(),
+            sql_type: "tier".into(),
+            class: TypeClass::Enum {
+                name: "tier".into(),
+            },
+            nullable: false,
+            has_default: false,
+            generated: false,
+            identity: false,
+        });
+
+        let mut live = locked.clone();
+        let inlined = "enum('free','pro','team')".to_string();
+        live.enums.clear();
+        live.enums.insert(
+            inlined.clone(),
+            vec!["free".into(), "pro".into(), "team".into()],
+        );
+        users(&mut live).columns.last_mut().unwrap().class = TypeClass::Enum { name: inlined };
+
+        assert!(
+            classify(&locked, &live).is_empty(),
+            "{}",
+            classify(&locked, &live).render()
+        );
     }
 
     #[test]

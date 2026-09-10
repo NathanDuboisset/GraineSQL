@@ -96,7 +96,7 @@ fn a_dry_run_load_shows_what_it_would_do() {
 fn schema_drift_blocks_the_row_comparison() {
     let base = require_pg!();
     let f = prepared("diffdrift", &base);
-    f.sql_dst("ALTER TABLE orgs ALTER COLUMN name TYPE varchar(3)")
+    f.sql_dst("ALTER TABLE orgs ADD COLUMN region text NOT NULL")
         .unwrap();
 
     f.fail(&["diff", "--data", "--source", "dst"])

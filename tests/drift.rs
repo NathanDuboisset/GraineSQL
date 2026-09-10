@@ -48,11 +48,6 @@ const BREAKING: &[(&str, &str, &str)] = &[
         "int64 -> int32",
     ),
     (
-        "shortened varchar",
-        "ALTER TABLE users ALTER COLUMN display TYPE varchar(5) USING NULL",
-        "varchar(5)",
-    ),
-    (
         "new NOT NULL column with no default",
         "ALTER TABLE countries ADD COLUMN region text NOT NULL DEFAULT 'x'; \
          ALTER TABLE countries ALTER COLUMN region DROP DEFAULT",
@@ -161,6 +156,13 @@ const CONFIRM: &[(&str, &str, &str)] = &[
         "column dropped",
     ),
     ("dropped table", "DROP TABLE orders", "table dropped"),
+    // Narrowing text is checked value by value before the transaction opens,
+    // so it prompts rather than aborting.
+    (
+        "shortened varchar",
+        "ALTER TABLE users ALTER COLUMN display TYPE varchar(5) USING NULL",
+        "varchar(5)",
+    ),
 ];
 
 #[test]

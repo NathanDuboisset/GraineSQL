@@ -418,3 +418,75 @@ fn every_fixture_round_trips_on_every_engine_it_declares() {
         "no fixture ran despite a configured database"
     );
 }
+
+/// Engine pairs whose lock travels with the seed files.
+///
+/// The replay above always re-locks against the target first, which throws away
+/// the source's lock and so never exercises the interesting case: a lock written
+/// by one engine checked against another.
+const CROSS: &[(&str, Engine, &[Engine])] = &[
+    ("cms", Engine::Postgres, &[Engine::Mysql, Engine::Sqlite]),
+    ("graph", Engine::Postgres, &[Engine::Mysql, Engine::Sqlite]),
+    (
+        "ecommerce",
+        Engine::Postgres,
+        &[Engine::Mysql, Engine::Sqlite],
+    ),
+    // SQLite has no exact decimal, so analytics cannot land there.
+    ("analytics", Engine::Postgres, &[Engine::Mysql]),
+    // The directions nothing covered: these narrow rather than widen, which is
+    // where the type classes are most likely to refuse.
+    ("cms", Engine::Sqlite, &[Engine::Postgres, Engine::Mysql]),
+    ("graph", Engine::Mysql, &[Engine::Postgres, Engine::Sqlite]),
+];
+
+#[test]
+fn a_lock_and_its_seed_files_load_into_another_engine() {
+    let mut ran = 0;
+
+    for (fixture, from, targets) in CROSS {
+        let Some(from_base) = from.base_url() else {
+            continue;
+        };
+
+        // Export from the source engine, keeping its lock.
+        let src = Run::new(fixture, *from, &from_base);
+        src.exec(&src.url(), &src.data_sql())
+            .unwrap_or_else(|e| panic!("{fixture}: loading data.sql: {e}"));
+        src.ok(&["lock", "-q"]);
+        src.ok(&["export", "-o", "out", "-q"]);
+
+        for to in *targets {
+            let Some(to_base) = to.base_url() else {
+                continue;
+            };
+            let dst = Run::new(fixture, *to, &to_base);
+
+            // The source's lock travels with the files; the target never locks.
+            let seed = dst.dir.path().join("seed");
+            let _ = std::fs::remove_dir_all(&seed);
+            copy_dir(&src.dir.path().join("out"), &seed);
+
+            dst.ok(&["load", "--yes", "-q"]);
+
+            // Re-exporting from the target reproduces the same rows, which is a
+            // stronger claim than a row count.
+            dst.ok(&["lock", "-q"]);
+            dst.ok(&["export", "-o", "back", "-q"]);
+            if let Some(d) = seed_files_differ(&seed, &dst.dir.path().join("back")) {
+                panic!(
+                    "{fixture}: {} -> {} did not round-trip:\n{d}",
+                    from.name(),
+                    to.name()
+                );
+            }
+            eprintln!("ok: {fixture} {} -> {}", from.name(), to.name());
+            ran += 1;
+        }
+    }
+
+    assert!(
+        ran > 0 || std::env::var("GRAINE_TEST_PG").is_err(),
+        "no cross-engine pair ran despite a configured database"
+    );
+}
