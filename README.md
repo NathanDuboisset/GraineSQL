@@ -33,7 +33,7 @@ cargo install grainesql                      # from source
 Or download a binary from [Releases](https://github.com/NathanDuboisset/grainesql/releases);
 each archive ships a `.sha256`.
 
-Needs Rust 1.85+ to build. Postgres 12+, Supabase, MySQL 8+ or SQLite at
+Needs Rust 1.88+ to build. Postgres 12+, Supabase, MySQL 8+ or SQLite at
 runtime.
 
 ## Getting started
