@@ -90,7 +90,7 @@ pub async fn introspect(db: &Db) -> Result<Schema> {
     let mut schema = match db.engine().dialect() {
         Engine::Mysql => mysql::introspect(db).await,
         Engine::Sqlite => sqlite::introspect(db).await,
-        _ => postgres::introspect(db).await,
+        Engine::Postgres | Engine::Supabase => postgres::introspect(db).await,
     }?;
 
     // A primary key column is NOT NULL whatever the catalog says. SQLite only
@@ -111,7 +111,7 @@ pub async fn list_tables(db: &Db) -> Result<Vec<TableId>> {
     match db.engine().dialect() {
         Engine::Mysql => mysql::list_tables(db).await,
         Engine::Sqlite => sqlite::list_tables(db).await,
-        _ => postgres::list_tables(db).await,
+        Engine::Postgres | Engine::Supabase => postgres::list_tables(db).await,
     }
 }
 
@@ -120,7 +120,7 @@ pub async fn default_schema(db: &Db) -> Result<String> {
     let sql = match db.engine().dialect() {
         Engine::Mysql => "SELECT DATABASE()",
         Engine::Sqlite => return Ok(sqlite::SCHEMA.to_string()),
-        _ => "SELECT current_schema()",
+        Engine::Postgres | Engine::Supabase => "SELECT current_schema()",
     };
     Ok(db
         .query_text(sql)
@@ -327,7 +327,7 @@ impl Db {
                         )
                     })?,
             ),
-            _ => Pool::Pg(
+            Engine::Postgres | Engine::Supabase => Pool::Pg(
                 PgPoolOptions::new()
                     .max_connections(max_conns)
                     .after_connect(move |conn, _| {

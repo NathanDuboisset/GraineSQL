@@ -152,12 +152,11 @@ const COPY_CHUNK_ROWS: usize = 1_000;
 fn max_binds(engine: Engine) -> usize {
     match engine.dialect() {
         // The wire protocol counts parameters in a u16 on both.
-        Engine::Mysql => 65_535,
+        Engine::Mysql | Engine::Postgres | Engine::Supabase => 65_535,
         // SQLITE_MAX_VARIABLE_NUMBER is a compile-time limit, and only since
         // 3.32 does it default to 32766. 999 is what an older build allows, and
         // which build sqlx links is not ours to know.
         Engine::Sqlite => 999,
-        _ => 65_535,
     }
 }
 

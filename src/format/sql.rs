@@ -324,7 +324,7 @@ pub fn read_sql(
     // data can contain anything.
     let esc = match engine.dialect() {
         Engine::Mysql => Escaping::Backslash,
-        _ => Escaping::QuoteOnly,
+        Engine::Postgres | Engine::Supabase | Engine::Sqlite => Escaping::QuoteOnly,
     };
 
     let mut rows = Vec::new();

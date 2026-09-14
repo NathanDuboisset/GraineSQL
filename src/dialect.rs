@@ -194,7 +194,7 @@ pub fn for_engine(engine: Engine) -> Box<dyn Dialect> {
     match engine.dialect() {
         Engine::Mysql => Box::new(Mysql),
         Engine::Sqlite => Box::new(Sqlite),
-        _ => Box::new(Postgres),
+        Engine::Postgres | Engine::Supabase => Box::new(Postgres),
     }
 }
 

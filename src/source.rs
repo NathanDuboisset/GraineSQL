@@ -230,7 +230,7 @@ fn check_scheme(name: &str, engine: Engine, url: &str) -> Result<()> {
         Engine::Mysql => matches!(scheme, "mysql" | "mariadb"),
         // A path with no scheme is the common way to name a database file.
         Engine::Sqlite => scheme.is_empty() || scheme == "sqlite",
-        _ => matches!(scheme, "postgres" | "postgresql"),
+        Engine::Postgres | Engine::Supabase => matches!(scheme, "postgres" | "postgresql"),
     };
     if !ok {
         bail!(

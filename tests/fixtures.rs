@@ -212,11 +212,11 @@ impl Drop for Run {
     fn drop(&mut self) {
         // Best effort: a leftover database only affects the next run, which
         // drops it first. Panicking here would abort the test process.
-        if let Some((_, admin)) = &self.database {
-            if !admin.is_empty() {
-                let name = format!("graine_fx_{}_{}", self.fixture, self.engine.name());
-                let _ = self.exec(admin, &format!("DROP DATABASE IF EXISTS {name}"));
-            }
+        if let Some((_, admin)) = &self.database
+            && !admin.is_empty()
+        {
+            let name = format!("graine_fx_{}_{}", self.fixture, self.engine.name());
+            let _ = self.exec(admin, &format!("DROP DATABASE IF EXISTS {name}"));
         }
     }
 }

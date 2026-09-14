@@ -91,11 +91,11 @@ pub async fn introspect(db: &Db) -> Result<Schema> {
         // that needs correcting after a load, so `identity` is reserved for it.
         if table.primary_key.len() == 1 {
             let key = table.primary_key[0].clone();
-            if let Some(c) = table.columns.iter_mut().find(|c| c.name == key) {
-                if c.sql_type.trim().eq_ignore_ascii_case("integer") {
-                    c.has_default = true;
-                    c.identity = autoinc.contains(&id.name);
-                }
+            if let Some(c) = table.columns.iter_mut().find(|c| c.name == key)
+                && c.sql_type.trim().eq_ignore_ascii_case("integer")
+            {
+                c.has_default = true;
+                c.identity = autoinc.contains(&id.name);
             }
         }
 

@@ -410,9 +410,7 @@ fn hex(bytes: &[u8], upper: bool) -> String {
 }
 
 fn hex_decode(s: &str) -> Result<Vec<u8>> {
-    // `usize::is_multiple_of` would read better but is newer than the declared
-    // MSRV.
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         bail!("hex string has an odd length ({} chars)", s.len());
     }
     let bytes = s.as_bytes();
