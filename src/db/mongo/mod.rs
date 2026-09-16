@@ -25,9 +25,9 @@
 //!   database *guarantees*. A collection with no validator guarantees nothing,
 //!   so a lock can only record what was *observed*.
 //!
-//! # The open question
+//! # What counts as the schema when there is no schema
 //!
-//! What counts as the schema when there is no schema.
+//! Decided: a validator is a contract, an inferred profile is not.
 //!
 //! A collection may carry a [JSON Schema validator], in which case it is a real
 //! contract and drift classification works exactly as it does for a table:
@@ -44,10 +44,9 @@
 //! - Treating it as advisory makes the lock decorative for most collections,
 //!   which undercuts the reason the lock exists.
 //!
-//! The intended answer, not yet implemented, is that a validator is a contract
-//! and an inferred profile is not: profiles get recorded and reported as benign
-//! drift, and only validator changes can be breaking. That keeps the guarantee
-//! honest, which matters more than making every collection look locked.
+//! So profiles are recorded and reported as benign drift, and only validator
+//! changes can be breaking. That keeps the guarantee honest, which matters more
+//! than making every collection look locked.
 //!
 //! # What is genuinely hard
 //!
@@ -61,6 +60,18 @@
 //!
 //! [JSON Schema validator]: https://www.mongodb.com/docs/manual/core/schema-validation/
 //! [Extended JSON]: https://www.mongodb.com/docs/manual/reference/mongodb-extended-json/
+
+#[cfg(feature = "mongo")]
+pub mod data;
+#[cfg(feature = "mongo")]
+pub mod introspect;
+#[cfg(feature = "mongo")]
+pub mod ops;
+#[cfg(feature = "mongo")]
+pub mod value;
+
+#[cfg(feature = "mongo")]
+pub use introspect::{database_name, introspect, list_collections};
 
 use crate::schema::TypeClass;
 
@@ -109,16 +120,25 @@ pub fn classify(bson_type: &str) -> TypeClass {
             precision: Some(34),
             scale: None,
         },
-        "string" | "regex" | "javascript" | "symbol" => TypeClass::Text { max_len: None },
+        "string" | "javascript" | "symbol" => TypeClass::Text { max_len: None },
         "binData" => TypeClass::Bytes,
-        // An ObjectId is 12 bytes with its own text form, not a UUID, but it
-        // shares the property that matters here: an opaque identifier written
-        // as a fixed-width string.
-        "objectId" => TypeClass::Text { max_len: Some(24) },
+        // Not `Text`: the write path has to rebuild an ObjectId, and a string
+        // `_id` is a different document, which would break every upsert.
+        "objectId" => TypeClass::Other {
+            name: "objectId".into(),
+        },
+        // A regex is not its source text; collapsing it would lose the flags.
+        "regex" => TypeClass::Other {
+            name: "regex".into(),
+        },
         "uuid" => TypeClass::Uuid,
         // A BSON date is milliseconds since the epoch in UTC, so it is an
         // instant rather than a wall clock.
-        "date" | "timestamp" => TypeClass::Timestamp { tz: true },
+        "date" => TypeClass::Timestamp { tz: true },
+        // A BSON Timestamp is an internal replication type, not an instant.
+        "timestamp" => TypeClass::Other {
+            name: "timestamp".into(),
+        },
         // Nested documents and arrays are carried as JSON, the same way a
         // relational jsonb column is.
         "object" | "array" => TypeClass::Json { binary: true },
@@ -165,9 +185,18 @@ mod tests {
     }
 
     #[test]
-    fn a_bson_date_is_an_instant_not_a_wall_clock() {
+    fn a_bson_date_is_an_instant_but_a_timestamp_is_not() {
         assert_eq!(classify("date"), TypeClass::Timestamp { tz: true });
-        assert_eq!(classify("timestamp"), TypeClass::Timestamp { tz: true });
+        // A BSON Timestamp is a replication counter, not a point in time.
+        assert!(matches!(classify("timestamp"), TypeClass::Other { .. }));
+    }
+
+    #[test]
+    fn an_object_id_is_carried_verbatim_not_as_a_string() {
+        // As `Text` the write path would store a string `_id`, which is a
+        // different document and breaks upsert.
+        assert!(matches!(classify("objectId"), TypeClass::Other { .. }));
+        assert!(matches!(classify("regex"), TypeClass::Other { .. }));
     }
 
     #[test]

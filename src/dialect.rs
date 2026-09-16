@@ -190,11 +190,13 @@ pub fn sql_literal(v: &str) -> String {
     format!("'{}'", v.replace('\'', "''"))
 }
 
-pub fn for_engine(engine: Engine) -> Box<dyn Dialect> {
+/// The SQL dialect for an engine, or `None` for one that does not speak SQL.
+pub fn for_engine(engine: Engine) -> Option<Box<dyn Dialect>> {
     match engine.dialect() {
-        Engine::Mysql => Box::new(Mysql),
-        Engine::Sqlite => Box::new(Sqlite),
-        Engine::Postgres | Engine::Supabase => Box::new(Postgres),
+        Engine::Mysql => Some(Box::new(Mysql)),
+        Engine::Sqlite => Some(Box::new(Sqlite)),
+        Engine::Postgres | Engine::Supabase => Some(Box::new(Postgres)),
+        Engine::Mongo => None,
     }
 }
 

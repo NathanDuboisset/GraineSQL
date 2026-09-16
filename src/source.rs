@@ -231,6 +231,7 @@ fn check_scheme(name: &str, engine: Engine, url: &str) -> Result<()> {
         // A path with no scheme is the common way to name a database file.
         Engine::Sqlite => scheme.is_empty() || scheme == "sqlite",
         Engine::Postgres | Engine::Supabase => matches!(scheme, "postgres" | "postgresql"),
+        Engine::Mongo => matches!(scheme, "mongodb" | "mongodb+srv"),
     };
     if !ok {
         bail!(

@@ -324,7 +324,8 @@ pub fn read_sql(
     // data can contain anything.
     let esc = match engine.dialect() {
         Engine::Mysql => Escaping::Backslash,
-        Engine::Postgres | Engine::Supabase | Engine::Sqlite => Escaping::QuoteOnly,
+        // Mongo writes no `.sql`; the config validator refuses the combination.
+        Engine::Postgres | Engine::Supabase | Engine::Sqlite | Engine::Mongo => Escaping::QuoteOnly,
     };
 
     let mut rows = Vec::new();

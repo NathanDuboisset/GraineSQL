@@ -372,12 +372,20 @@ pub async fn cmd_status(ctx: &Ctx) -> Result<()> {
                     .get(&crate::lock::relative(&id, &live.default_schema))
             })
             .map(|f| f.rows);
-        let live_rows = db
-            .query_text(&db.dialect().count_query(&id))
-            .await
-            .ok()
-            .and_then(|r| r.first().and_then(|r| r.first().cloned().flatten()))
-            .and_then(|v| v.trim().parse::<u64>().ok());
+        let live_rows = if !db.engine().is_sql() {
+            #[cfg(feature = "mongo")]
+            {
+                crate::db::mongo::data::count(&db, &id.name).await.ok()
+            }
+            #[cfg(not(feature = "mongo"))]
+            None
+        } else {
+            db.query_text(&db.dialect().count_query(&id))
+                .await
+                .ok()
+                .and_then(|r| r.first().and_then(|r| r.first().cloned().flatten()))
+                .and_then(|v| v.trim().parse::<u64>().ok())
+        };
         tables.push((id, recorded, live_rows));
     }
 

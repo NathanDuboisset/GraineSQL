@@ -51,6 +51,25 @@ jobs:
       - name: Install psql
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
 
+      # Not a service container: those cannot override the command, and Mongo
+      # needs --replSet before it will run a multi-document transaction.
+      - name: Start MongoDB as a replica set
+        run: |
+          docker run -d --name mongo -p 27017:27017 mongo:7 \
+            --replSet rs0 --bind_ip_all
+          for _ in $(seq 1 60); do
+            docker exec mongo mongosh --quiet --eval 'db.runCommand({ping:1}).ok' \
+              >/dev/null 2>&1 && break
+            sleep 1
+          done
+          docker exec mongo mongosh --quiet --eval \
+            'rs.initiate({_id:"rs0",members:[{_id:0,host:"127.0.0.1:27017"}]})'
+          # Wait for the node to finish electing itself primary.
+          for _ in $(seq 1 30); do
+            [ "$(docker exec mongo mongosh --quiet --eval 'rs.status().myState')" = 1 ] && break
+            sleep 1
+          done
+
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets --all-features
       # SQLite needs no service and always runs. The fixture suite reads the
@@ -59,7 +78,12 @@ jobs:
         env:
           GRAINE_TEST_PG: postgres://postgres:postgres@localhost:5432
           GRAINE_TEST_MYSQL: mysql://root:graine@127.0.0.1:3306
+          GRAINE_TEST_MONGO: mongodb://127.0.0.1:27017
         run: cargo test --all-features
+
+      # The default build must stay clean too: `mongo` is optional, and an
+      # unused import behind the feature gate would only show up here.
+      - run: cargo clippy --all-targets
 
   storage:
     name: storage (supabase)

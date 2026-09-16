@@ -28,6 +28,16 @@ use crate::source::ResolvedSource;
 /// One row, every column already rendered as text. `None` is SQL NULL.
 pub type TextRow = Vec<Option<String>>;
 
+/// Unreachable from user input: every command branches on [`Engine::is_sql`]
+/// before taking a SQL path, so this names a bug rather than a mistake.
+#[cfg(feature = "mongo")]
+const NOT_SQL: &str = "internal: a SQL statement was built for a document engine";
+
+/// What a build without the feature says when a config asks for Mongo.
+#[cfg(not(feature = "mongo"))]
+const NO_MONGO: &str =
+    "this build has no MongoDB support; install with `cargo install grainesql --features mongo`";
+
 /// Levenshtein distance, for "did you mean" suggestions.
 fn edit_distance(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
@@ -91,6 +101,10 @@ pub async fn introspect(db: &Db) -> Result<Schema> {
         Engine::Mysql => mysql::introspect(db).await,
         Engine::Sqlite => sqlite::introspect(db).await,
         Engine::Postgres | Engine::Supabase => postgres::introspect(db).await,
+        #[cfg(feature = "mongo")]
+        Engine::Mongo => mongo::introspect(db).await,
+        #[cfg(not(feature = "mongo"))]
+        Engine::Mongo => Err(anyhow::anyhow!(NO_MONGO)),
     }?;
 
     // A primary key column is NOT NULL whatever the catalog says. SQLite only
@@ -112,6 +126,10 @@ pub async fn list_tables(db: &Db) -> Result<Vec<TableId>> {
         Engine::Mysql => mysql::list_tables(db).await,
         Engine::Sqlite => sqlite::list_tables(db).await,
         Engine::Postgres | Engine::Supabase => postgres::list_tables(db).await,
+        #[cfg(feature = "mongo")]
+        Engine::Mongo => mongo::list_collections(db).await,
+        #[cfg(not(feature = "mongo"))]
+        Engine::Mongo => Err(anyhow::anyhow!(NO_MONGO)),
     }
 }
 
@@ -120,6 +138,10 @@ pub async fn default_schema(db: &Db) -> Result<String> {
     let sql = match db.engine().dialect() {
         Engine::Mysql => "SELECT DATABASE()",
         Engine::Sqlite => return Ok(sqlite::SCHEMA.to_string()),
+        #[cfg(feature = "mongo")]
+        Engine::Mongo => return mongo::database_name(db),
+        #[cfg(not(feature = "mongo"))]
+        Engine::Mongo => bail!(NO_MONGO),
         Engine::Postgres | Engine::Supabase => "SELECT current_schema()",
     };
     Ok(db
@@ -269,11 +291,17 @@ pub enum Pool {
     Pg(PgPool),
     My(MySqlPool),
     Lite(SqlitePool),
+    /// The client plus the database named in the URL, which Mongo needs
+    /// explicitly where a SQL connection carries it.
+    #[cfg(feature = "mongo")]
+    Mongo(mongodb::Client, String),
 }
 
 pub struct Db {
-    pool: Pool,
-    dialect: Box<dyn Dialect>,
+    pub(crate) pool: Pool,
+    /// `None` for an engine that does not speak SQL.
+    dialect: Option<Box<dyn Dialect>>,
+    engine: Engine,
     pub source_name: String,
 }
 
@@ -285,7 +313,8 @@ impl Db {
     /// Connect with room for `max_conns` concurrent operations.
     pub async fn connect_with(src: &ResolvedSource, max_conns: u32) -> Result<Db> {
         let dialect = dialect::for_engine(src.engine);
-        let setup: &'static [&'static str] = dialect.session_setup();
+        let setup: &'static [&'static str] =
+            dialect.as_ref().map(|d| d.session_setup()).unwrap_or(&[]);
         let max_conns = max_conns.max(1);
 
         let pool = match src.engine.dialect() {
@@ -327,6 +356,36 @@ impl Db {
                         )
                     })?,
             ),
+            #[cfg(feature = "mongo")]
+            Engine::Mongo => {
+                let client = mongodb::Client::with_uri_str(&src.url)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "connecting to source {:?} at {}",
+                            src.name,
+                            src.redacted_url()
+                        )
+                    })?;
+                let database = mongodb::options::ClientOptions::parse(&src.url)
+                    .await
+                    .ok()
+                    .and_then(|o| o.default_database)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "source {:?}: the MongoDB URL names no database. Append one, \
+                             as in mongodb://host:27017/myapp",
+                            src.name
+                        )
+                    })?;
+                Pool::Mongo(client, database)
+            }
+            #[cfg(not(feature = "mongo"))]
+            Engine::Mongo => bail!(
+                "source {:?} uses `engine: mongo`, which this build does not have. \
+                 Install with `--features mongo`.",
+                src.name
+            ),
             Engine::Postgres | Engine::Supabase => Pool::Pg(
                 PgPoolOptions::new()
                     .max_connections(max_conns)
@@ -353,21 +412,34 @@ impl Db {
         Ok(Db {
             pool,
             dialect,
+            engine: src.engine,
             source_name: src.name.clone(),
         })
     }
 
+    /// The SQL dialect. Only reachable for a SQL engine: every command branches
+    /// on [`Engine::is_sql`] first, so this cannot be hit from user input.
     pub fn dialect(&self) -> &dyn Dialect {
-        self.dialect.as_ref()
+        self.dialect
+            .as_deref()
+            .expect("internal: the SQL path was reached for a document engine")
     }
 
     pub fn engine(&self) -> Engine {
-        self.dialect.engine()
+        self.engine
     }
 
     /// Round-trip check, used by `graine sources`.
     pub async fn ping(&self) -> Result<String> {
-        let rows = self.query_text(self.dialect.version_query()).await?;
+        #[cfg(feature = "mongo")]
+        if let Pool::Mongo(..) = &self.pool {
+            let n = mongo::ops::list_collections(self).await?.len();
+            return Ok(format!(
+                "mongodb, {n} collection{}",
+                if n == 1 { "" } else { "s" }
+            ));
+        }
+        let rows = self.query_text(self.dialect().version_query()).await?;
         Ok(rows
             .first()
             .and_then(|r| r.first().cloned().flatten())
@@ -396,6 +468,8 @@ impl Db {
         use futures_util::StreamExt;
         let mut n = 0u64;
         match &self.pool {
+            #[cfg(feature = "mongo")]
+            Pool::Mongo(..) => bail!(NOT_SQL),
             Pool::Pg(p) => {
                 let mut stream = sqlx::query(sql).fetch(p);
                 while let Some(row) = stream.next().await {
@@ -427,6 +501,8 @@ impl Db {
     /// Execute a statement with no parameters, returning rows affected.
     pub async fn execute(&self, sql: &str) -> Result<u64> {
         match &self.pool {
+            #[cfg(feature = "mongo")]
+            Pool::Mongo(..) => bail!(NOT_SQL),
             Pool::Pg(p) => Ok(sqlx::raw_sql(sql)
                 .execute(p)
                 .await
@@ -448,6 +524,8 @@ impl Db {
     /// Execute a statement with text bind parameters, returning rows affected.
     pub async fn execute_with(&self, sql: &str, binds: &[Option<String>]) -> Result<u64> {
         match &self.pool {
+            #[cfg(feature = "mongo")]
+            Pool::Mongo(..) => bail!(NOT_SQL),
             Pool::Pg(p) => {
                 let mut q = sqlx::query(sql);
                 for b in binds {
@@ -488,6 +566,8 @@ impl Db {
     /// meaningless.
     pub async fn pinned(&self) -> Result<PinnedConn<'_>> {
         Ok(match &self.pool {
+            #[cfg(feature = "mongo")]
+            Pool::Mongo(..) => bail!(NOT_SQL),
             Pool::Pg(p) => PinnedConn::Pg(p.acquire().await.context("acquiring a connection")?),
             Pool::My(p) => PinnedConn::My(p.acquire().await.context("acquiring a connection")?),
             Pool::Lite(p) => PinnedConn::Lite(p.acquire().await.context("acquiring a connection")?),

@@ -212,10 +212,31 @@ impl Report {
 /// `locked` is the contract the committed seed files were written against;
 /// `live` is what the database looks like now.
 pub fn classify(locked: &Schema, live: &Schema) -> Report {
+    classify_with(locked, live, Creatable::No)
+}
+
+/// Whether a table the live database lacks will simply be created by a load.
+///
+/// True for a document engine: a collection is not a schema object anyone
+/// migrates, it springs into existence on the first write. Saying "dropped, its
+/// rows will be discarded" there is the opposite of what happens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Creatable {
+    Yes,
+    No,
+}
+
+pub fn classify_with(locked: &Schema, live: &Schema, creatable: Creatable) -> Report {
     let mut drifts = Vec::new();
 
     for (id, locked_table) in &locked.tables {
         match live.get(id) {
+            None if creatable == Creatable::Yes => drifts.push(Drift {
+                severity: Severity::Benign,
+                target: Target::Table(id.clone()),
+                what: "not in the target yet".into(),
+                note: "a load creates it".into(),
+            }),
             None => drifts.push(Drift {
                 severity: Severity::Confirm,
                 target: Target::Table(id.clone()),
@@ -247,7 +268,7 @@ pub fn classify(locked: &Schema, live: &Schema) -> Report {
         }
     }
 
-    compare_enums(locked, live, &mut drifts);
+    compare_enums(locked, live, creatable, &mut drifts);
 
     // Breaking first, then by table, so the most important line is at the top
     // and the ordering is stable across runs.
@@ -488,7 +509,7 @@ fn enum_labels<'a>(schema: &'a Schema, class: &TypeClass) -> Option<&'a Vec<Stri
     }
 }
 
-fn compare_enums(locked: &Schema, live: &Schema, out: &mut Vec<Drift>) {
+fn compare_enums(locked: &Schema, live: &Schema, creatable: Creatable, out: &mut Vec<Drift>) {
     for (name, locked_labels) in &locked.enums {
         // Matched by labels, not by name: MySQL has no named enum types, so the
         // same set of labels arrives under the declaration text instead.
@@ -499,7 +520,7 @@ fn compare_enums(locked: &Schema, live: &Schema, out: &mut Vec<Drift>) {
         let Some(live_labels) = live.enums.get(name).or(by_labels) else {
             // The type is gone entirely; the column type change already reports
             // this, so do not double-report unless no column mentions it.
-            if !any_column_uses_enum(locked, name) {
+            if !any_column_uses_enum(locked, name) || creatable == Creatable::Yes {
                 continue;
             }
             out.push(Drift {

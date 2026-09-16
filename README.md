@@ -28,7 +28,11 @@ to run, and refuses to run when the schema no longer matches the files.
 brew install nathanduboisset/tap/grainesql   # macOS and Linux
 cargo binstall grainesql                     # prebuilt binary, no compile
 cargo install grainesql                      # from source
+cargo install grainesql --features mongo     # and with MongoDB support
 ```
+
+MongoDB is optional because it adds roughly sixty crates, and the relational
+binary most people install should not carry them.
 
 Or download a binary from [Releases](https://github.com/NathanDuboisset/grainesql/releases);
 each archive ships a `.sha256`.
@@ -133,6 +137,7 @@ the source outright; use it on anything you export from.
 | `supabase` | Postgres, plus storage discovery so buckets need no config |
 | `mysql` | Verified end to end |
 | `sqlite` | Verified end to end. `url: sqlite://app.db`, or a bare path |
+| `mongo` | Behind `--features mongo`. Collections rather than tables; see below |
 
 `engine: supabase` looks for the storage URL in `SUPABASE_URL`,
 `NEXT_PUBLIC_SUPABASE_URL`, `VITE_SUPABASE_URL` or `PUBLIC_SUPABASE_URL`, and
@@ -239,6 +244,41 @@ public.orders.legacy_ref: column dropped (was text).
 decision. For a table whose schema churns constantly, `on_drift: ignore` is
 better than answering every time, and better than `--force`, which would
 disable the check everywhere.
+
+### MongoDB
+
+A collection is a table, a field is a column, `_id` is the primary key, and the
+database is the schema. Two consequences fall out of that and are not
+limitations so much as what Mongo is:
+
+- **There is no load order.** Mongo enforces no references, so the topological
+  sort degenerates to alphabetical and the referential check has nothing to
+  check.
+- **The contract is weaker, and only sometimes.** A collection with a
+  `$jsonSchema` validator is a real contract, so its fields become real columns
+  and every drift rule applies to them. A collection without one is described by
+  an inferred profile — which fields a sample held, and of which BSON types —
+  and that is recorded but can never fail a load. In Mongo a new field is
+  normal; treating an observation as a guarantee would make the lock lie.
+
+The sample is `find().sort({_id: 1}).limit(1000)`, never `$sample`: a randomised
+sample would make the lock flap and `lock --check` useless in CI.
+
+BSON carries types JSON cannot. ObjectId, Decimal128, Binary, Date, Timestamp
+and Regex round-trip as themselves rather than collapsing into strings, and a
+nested document keeps its Extended JSON, so `{"$oid": ...}` stays an ObjectId
+on reload.
+
+Three differences worth knowing:
+
+- `where:` is a filter document, not SQL: `where: '{"status": {"$ne": "draft"}}'`.
+- `format: sql` is refused. There is no dialect to generate it with.
+- A load runs in a transaction, which needs a replica set or mongos. Against a
+  standalone `mongod` it refuses rather than silently dropping atomicity; pass
+  `--no-transaction` to accept a partial load.
+
+As everywhere else, GraineSQL moves data and never schema: validators and
+indexes belong to your migrations, so create them on the target first.
 
 ## Storage buckets
 

@@ -21,6 +21,8 @@ pub enum Engine {
     /// `storage:` block.
     Supabase,
     Sqlite,
+    /// Documents rather than rows. Behind the `mongo` feature.
+    Mongo,
 }
 
 impl Engine {
@@ -30,7 +32,14 @@ impl Engine {
             Engine::Mysql => "mysql",
             Engine::Supabase => "supabase",
             Engine::Sqlite => "sqlite",
+            Engine::Mongo => "mongo",
         }
+    }
+
+    /// Whether this engine speaks SQL. Mongo does not, and takes a separate
+    /// path through export and load.
+    pub fn is_sql(self) -> bool {
+        !matches!(self, Engine::Mongo)
     }
 
     /// The wire protocol to speak. Supabase is Postgres.
@@ -52,6 +61,7 @@ impl Engine {
         match scheme {
             "mysql" | "mariadb" => Engine::Mysql,
             "sqlite" => Engine::Sqlite,
+            "mongodb" | "mongodb+srv" => Engine::Mongo,
             // A bare path is a database file.
             "" => Engine::Sqlite,
             _ => Engine::Postgres,
@@ -500,6 +510,29 @@ impl Config {
         }
         if self.load.batch == 0 {
             bail!("load.batch must be at least 1");
+        }
+
+        // `.sql` needs a dialect to generate, and a document engine has none.
+        if self.sources.values().any(|s| !s.engine.is_sql()) {
+            let sql_tables: Vec<&str> = self
+                .tables
+                .iter()
+                .filter(|(_, t)| t.format == Some(Format::Sql))
+                .map(|(k, _)| k.as_str())
+                .collect();
+            if self.export.format == Format::Sql || !sql_tables.is_empty() {
+                bail!(
+                    "format: sql cannot be produced for a document engine{}",
+                    if sql_tables.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" (tables: {})", sql_tables.join(", "))
+                    }
+                );
+            }
+            if !self.buckets.is_empty() {
+                bail!("storage buckets are a Supabase feature; a mongo source has none");
+            }
         }
 
         for (key, t) in &self.tables {

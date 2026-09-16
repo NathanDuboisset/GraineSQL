@@ -21,7 +21,8 @@ pub fn chunk_for(engine: crate::config::Engine) -> usize {
         crate::config::Engine::Sqlite => 500,
         crate::config::Engine::Mysql
         | crate::config::Engine::Postgres
-        | crate::config::Engine::Supabase => 5_000,
+        | crate::config::Engine::Supabase
+        | crate::config::Engine::Mongo => 5_000,
     }
 }
 

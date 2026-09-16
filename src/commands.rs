@@ -195,7 +195,12 @@ pub fn gate_on_drift_with_buckets(
     live_buckets: &IndexMap<String, storage::BucketSettings>,
     force: bool,
 ) -> Result<drift::Report> {
-    let mut report = drift::classify(&lock.to_schema_for(live), live);
+    let creatable = if lock.engine.is_sql() {
+        drift::Creatable::No
+    } else {
+        drift::Creatable::Yes
+    };
+    let mut report = drift::classify_with(&lock.to_schema_for(live), live, creatable);
 
     if !lock.buckets.is_empty() || !live_buckets.is_empty() {
         let largest: IndexMap<String, u64> = lock
@@ -615,6 +620,59 @@ async fn data_diff(
     Ok(diffs)
 }
 
+/// Load into a document engine, which has no SQL and no foreign keys.
+#[allow(unused_variables)]
+async fn load_documents(
+    ctx: &Ctx,
+    db: &Db,
+    live: &Schema,
+    loads: &[(ResolvedTable, Vec<Vec<crate::value::Value>>)],
+    dry_run: bool,
+    use_transaction: bool,
+) -> Result<()> {
+    #[cfg(not(feature = "mongo"))]
+    bail!("this build has no MongoDB support");
+
+    #[cfg(feature = "mongo")]
+    {
+        // A multi-document transaction needs a replica set or mongos. Failing
+        // here rather than degrading silently keeps the promise that a failed
+        // load leaves the database as it was.
+        if use_transaction && !crate::db::mongo::ops::supports_transactions(db).await? {
+            bail!(
+                "source {:?} is a standalone mongod, which cannot run a multi-document \
+                 transaction, so a failure part-way through would leave a partial load.\n\
+                 Start it with --replSet, or pass --no-transaction to accept that.",
+                db.source_name
+            );
+        }
+        if dry_run {
+            ctx.say("dry run: nothing was written");
+            return Ok(());
+        }
+
+        let mut total = 0u64;
+        for (cfg, rows) in loads {
+            let r = crate::db::mongo::data::load_collection(db, live, cfg, rows).await?;
+            ctx.detail(format!(
+                "  {} -> {} document{}",
+                cfg.id,
+                r.affected,
+                if r.affected == 1 { "" } else { "s" }
+            ));
+            total += r.rows;
+        }
+        ctx.say(format!(
+            "loaded {} document{} into {} collection{}",
+            total,
+            if total == 1 { "" } else { "s" },
+            loads.len(),
+            if loads.len() == 1 { "" } else { "s" }
+        ));
+        Ok(())
+    }
+}
+
 fn drift_json(report: &drift::Report) -> String {
     let items: Vec<serde_json::Value> = report
         .drifts
@@ -770,17 +828,29 @@ pub async fn cmd_export(
         let index = to_index.get(&id).cloned().unwrap_or_default();
         progress.step(&id.to_string());
         let ticker = std::cell::RefCell::new(&mut progress);
-        let exported = export::export_table(
-            &db,
-            &live,
-            cfg,
-            ctx.cfg.export.sql_batch,
-            &index,
-            pulled.get(&id),
-            &out_dir,
-            |rows| ticker.borrow_mut().rows(rows),
-        )
-        .await?;
+        let exported = if db.engine().is_sql() {
+            export::export_table(
+                &db,
+                &live,
+                cfg,
+                ctx.cfg.export.sql_batch,
+                &index,
+                pulled.get(&id),
+                &out_dir,
+                |rows| ticker.borrow_mut().rows(rows),
+            )
+            .await?
+        } else {
+            #[cfg(feature = "mongo")]
+            {
+                crate::db::mongo::data::export_collection(&db, &live, cfg, &out_dir, |rows| {
+                    ticker.borrow_mut().rows(rows)
+                })
+                .await?
+            }
+            #[cfg(not(feature = "mongo"))]
+            bail!("this build has no MongoDB support")
+        };
         ctx.detail(format!(
             "  [{}/{}] {} -> {} ({} rows)",
             written.len() + 1,
@@ -918,8 +988,12 @@ async fn build_plans(
         else {
             continue;
         };
+        // A collection the target has not got yet is created by the load, so
+        // the lock is the only description of it there is.
+        let locked = lock.to_schema_for(live);
         let table = live
             .get(id)
+            .or_else(|| locked.get(id))
             .ok_or_else(|| anyhow::anyhow!("table {id} is not in the live schema"))?;
         let columns = export::selected_columns(table, cfg)?;
         let rows = format::read(&out_dir, &columns, cfg, &live.default_schema, lock.engine)?;
@@ -1037,6 +1111,17 @@ pub async fn cmd_load(
     let order = compute_order(&live, &ctx.cfg)?;
     let cycles = order::topological(&live, &order).cycles;
     let use_transaction = !no_transaction;
+
+    if !db.engine().is_sql() {
+        // Collections the target has not got yet are described only by the
+        // lock, so the load reads them from there.
+        let lock = Lock::read(&ctx.cfg.lock_path())?;
+        let mut schema = lock.to_schema_for(&live);
+        for (id, table) in &live.tables {
+            schema.tables.insert(id.clone(), table.clone());
+        }
+        return load_documents(ctx, &db, &schema, &loads, dry_run, use_transaction).await;
+    }
 
     let mut conn = db.pinned().await?;
     if use_transaction {

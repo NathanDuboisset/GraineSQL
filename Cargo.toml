@@ -44,6 +44,12 @@ pkg-fmt = "tgz"
 [package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
 pkg-fmt = "zip"
 
+[features]
+default = []
+# MongoDB is off by default: it adds ~60 crates, and the relational binary
+# most people install should not carry them.
+mongo = ["dep:mongodb", "dep:bson"]
+
 [dependencies]
 anyhow = "1"
 blake3 = "1"
@@ -71,6 +77,14 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["serde"] }
+
+# MongoDB, behind the `mongo` feature. rustls-tls is the same rustls 0.23 +
+# ring that sqlx's tls-rustls-ring already pins, so there is one TLS stack.
+# dns-resolver is what makes `mongodb+srv://` (Atlas) work.
+bson = { version = "2", optional = true }
+mongodb = { version = "3", optional = true, default-features = false, features = [
+    "rustls-tls", "dns-resolver", "bson-2", "compat-3-3-0",
+] }
 
 [dev-dependencies]
 sha2 = "0.10"
