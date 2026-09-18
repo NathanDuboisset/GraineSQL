@@ -26,8 +26,8 @@ pub async fn live_bucket_settings(
     }
     let client = storage_client(src)?;
     for (name, _) in &selected {
-        // A missing bucket is reported as drift by the caller, which explains it
-        // far better than a bare request failure.
+        // A missing bucket is reported as drift by the caller, which explains
+        // it; a bare request failure would not.
         if let Ok(settings) = client.bucket(name).await {
             out.insert(name.clone(), settings);
         }
@@ -171,9 +171,8 @@ pub async fn load_buckets(
             continue;
         }
 
-        // Buckets are created by migrations. GraineSQL moves data and never
-        // touches schema, so a missing bucket is an error rather than something
-        // to silently create with settings it guessed from a seed file.
+        // Buckets are schema, created by migrations, so a missing one is an
+        // error rather than something to create with guessed settings.
         client.bucket(name).await.with_context(|| {
             format!(
                 "bucket {name:?} must exist before its objects can be loaded, buckets are \

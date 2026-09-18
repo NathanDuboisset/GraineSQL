@@ -308,10 +308,6 @@ fn split_list(s: &str) -> Vec<String> {
     s.split(',').map(|p| p.to_string()).collect()
 }
 
-// ---------------------------------------------------------------------------
-// Type classification
-// ---------------------------------------------------------------------------
-
 /// Map a Postgres type onto a [`TypeClass`].
 ///
 /// `sql_type` is `format_type()` output (`character varying(50)`,

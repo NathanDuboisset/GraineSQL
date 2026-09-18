@@ -265,10 +265,8 @@ fn column_list(table: &Table) -> String {
 
 /// Build the `SELECT` for a table.
 ///
-/// The critical part is the `ORDER BY`: it always ends up a *total* order, so
-/// two exports of unchanged data are byte-identical. Without that, rows come
-/// back in whatever order the storage engine felt like, and every export
-/// produces diff noise.
+/// The `ORDER BY` always ends up a *total* order, so two exports of unchanged
+/// data are byte-identical.
 pub fn build_query(
     dialect: &dyn Dialect,
     table: &Table,
@@ -404,9 +402,7 @@ pub fn total_order(table: &Table, columns: &[&Column], cfg: &ResolvedTable) -> V
     }
     for col in columns {
         // Ordering by a json or array column is either illegal or
-        // collation-dependent, so those are left out; the columns above are
-        // normally enough, and a table whose only distinguishing column is json
-        // is pathological.
+        // collation-dependent, and the columns above are normally enough.
         if col.class.needs_text_cast() || matches!(col.class, crate::schema::TypeClass::Json { .. })
         {
             continue;
@@ -628,7 +624,6 @@ mod tests {
 
     #[test]
     fn order_by_is_always_a_total_order() {
-        // The point: even with no configured ordering, ties are impossible.
         let sql = query(&users(), &cfg());
         assert!(
             sql.contains("ORDER BY \"id\", \"email\" COLLATE \"C\", \"created_at\""),
@@ -710,8 +705,6 @@ mod tests {
 
     #[test]
     fn explicit_columns_follow_schema_order_not_config_order() {
-        // Two configs naming the same columns in different orders must produce
-        // byte-identical files.
         let mut a = cfg();
         a.columns = Some(vec!["email".into(), "id".into()]);
         let mut b = cfg();

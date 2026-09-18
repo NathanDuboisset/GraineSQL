@@ -78,10 +78,9 @@ impl BucketExport {
 
     /// One hash covering the bucket's contents.
     ///
-    /// Taken over the manifest rather than the file bytes, because the manifest
-    /// already contains every object's own sha256 plus its path and size, so a
-    /// change to any byte, name, or ordering changes this value, and computing
-    /// it needs no second pass over the data.
+    /// Over the manifest, not the bytes: the manifest already holds every
+    /// object's sha256, path and size, so this needs no second pass over the
+    /// data and still changes when any of them does.
     pub fn hash(&self) -> Result<String> {
         Ok(crate::lock::file_hash(&self.manifest_bytes()?))
     }
@@ -118,10 +117,9 @@ impl BucketExport {
 /// Convert an object key into a relative path that cannot escape its directory.
 ///
 /// Object keys are attacker-controlled in the general case: a key of
-/// `../../.ssh/authorized_keys` would otherwise make an export write outside the
-/// seed directory. Anything that is not a plain forward-slash-separated relative
-/// path is refused rather than silently rewritten, so a surprising key is a
-/// visible error instead of a file in an unexpected place.
+/// `../../.ssh/authorized_keys` would otherwise make an export write outside
+/// the seed directory. Anything that is not a plain forward-slash-separated
+/// relative path is refused rather than silently rewritten.
 pub fn safe_relative_path(key: &str) -> Result<PathBuf> {
     if key.is_empty() {
         bail!("object key is empty");
@@ -154,10 +152,6 @@ pub fn safe_relative_path(key: &str) -> Result<PathBuf> {
     }
     Ok(out)
 }
-
-// ---------------------------------------------------------------------------
-// Storage API client
-// ---------------------------------------------------------------------------
 
 /// Resolved credentials for a source's storage service.
 #[derive(Debug, Clone)]
@@ -526,8 +520,6 @@ mod tests {
         BucketExport { objects }
     }
 
-    // -- path safety --------------------------------------------------------
-
     #[test]
     fn ordinary_keys_become_relative_paths() {
         assert_eq!(safe_relative_path("a.pdf").unwrap(), PathBuf::from("a.pdf"));
@@ -535,7 +527,6 @@ mod tests {
             safe_relative_path("uuid/nested/file.pdf").unwrap(),
             PathBuf::from("uuid/nested/file.pdf")
         );
-        // Spaces, unicode, and dots inside a segment are all fine.
         assert_eq!(
             safe_relative_path("my folder/rapport final é.pdf").unwrap(),
             PathBuf::from("my folder/rapport final é.pdf")
@@ -548,8 +539,6 @@ mod tests {
 
     #[test]
     fn traversal_keys_are_refused_not_rewritten() {
-        // An object key is attacker-controlled in the general case; silently
-        // sanitising one would put a file somewhere the user did not expect.
         for key in [
             "../etc/passwd",
             "a/../../b",
@@ -580,8 +569,6 @@ mod tests {
         assert!(err.contains("../secret"), "{err}");
     }
 
-    // -- manifest determinism ----------------------------------------------
-
     #[test]
     fn the_manifest_is_one_sorted_line_per_object() {
         let e = export(vec![entry("a.pdf", 3, "aa"), entry("b.pdf", 4, "bb")]);
@@ -595,8 +582,6 @@ mod tests {
 
     #[test]
     fn manifest_keys_are_in_a_fixed_order() {
-        // Field order comes from the struct declaration, so it cannot drift with
-        // a map's iteration order.
         let text =
             String::from_utf8(export(vec![entry("a", 1, "h")]).manifest_bytes().unwrap()).unwrap();
         let path_at = text.find("\"path\"").unwrap();
@@ -610,7 +595,6 @@ mod tests {
         let e = export(vec![]);
         assert!(e.manifest_bytes().unwrap().is_empty());
         assert_eq!(e.total_bytes(), 0);
-        // And still has a stable hash, so drift on an empty bucket is detectable.
         assert!(!e.hash().unwrap().is_empty());
     }
 
@@ -622,14 +606,10 @@ mod tests {
         assert_eq!(text, "{\"path\":\"a\",\"size\":1,\"sha256\":\"h\"}\n");
     }
 
-    // -- hashing ------------------------------------------------------------
-
     #[test]
     fn the_bucket_hash_covers_content_and_names() {
         let base = export(vec![entry("a.pdf", 3, "aa"), entry("b.pdf", 4, "bb")]);
         let h = base.hash().unwrap();
-
-        // Same inputs, same hash.
         assert_eq!(
             h,
             export(vec![entry("a.pdf", 3, "aa"), entry("b.pdf", 4, "bb")])
@@ -637,17 +617,14 @@ mod tests {
                 .unwrap()
         );
 
-        // A changed byte changes the object's sha, so it changes the bucket hash.
         let mut changed = base.clone();
         changed.objects[0].sha256 = "cc".into();
         assert_ne!(h, changed.hash().unwrap(), "content change must show");
 
-        // A rename changes it too, even with identical bytes.
         let mut renamed = base.clone();
         renamed.objects[0].path = "renamed.pdf".into();
         assert_ne!(h, renamed.hash().unwrap(), "a rename must show");
 
-        // And a removal.
         let mut fewer = base.clone();
         fewer.objects.pop();
         assert_ne!(h, fewer.hash().unwrap(), "a deletion must show");
@@ -655,14 +632,11 @@ mod tests {
 
     #[test]
     fn object_hashes_are_plain_sha256() {
-        // So a user can check one with the sha256sum already on their machine.
         assert_eq!(
             crate::lock::file_hash(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
     }
-
-    // -- disk round trip ----------------------------------------------------
 
     #[test]
     fn a_bucket_round_trips_through_disk() {
@@ -687,11 +661,8 @@ mod tests {
             BucketExport::object_path(dir, "uuid/a.pdf").unwrap(),
             PathBuf::from("/seed/buckets/project_files/objects/uuid/a.pdf")
         );
-        // And a traversal key cannot produce a path outside it.
         assert!(BucketExport::object_path(dir, "../../escape").is_err());
     }
-
-    // -- url encoding -------------------------------------------------------
 
     #[test]
     fn segments_are_percent_encoded() {

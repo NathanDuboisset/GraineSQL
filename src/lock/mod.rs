@@ -126,10 +126,9 @@ impl Lock {
 
     /// The schema section as a [`Schema`], qualified against `default_schema`.
     ///
-    /// Tables are stored relative to whatever schema they came from, so the same
-    /// structure locks identically whatever the database is called. That matters
-    /// because the database a seed is exported from is rarely the one it loads
-    /// into, and on MySQL the database name *is* the schema name.
+    /// Tables are stored relative to whatever schema they came from, so the
+    /// same structure locks identically whatever the database is called. On
+    /// MySQL the database name *is* the schema name, which makes it matter.
     pub fn to_schema_in(&self, default_schema: &str) -> Schema {
         let mut s = Schema {
             default_schema: default_schema.to_string(),
@@ -490,7 +489,6 @@ mod tests {
         );
         assert!(lock.schema.contains_key(&TableId::bare("users")));
 
-        // And qualified again on the way out.
         assert_eq!(lock.order_in("public"), order);
         assert_eq!(lock.to_schema_in("public").tables.len(), 2);
         assert!(
@@ -510,7 +508,6 @@ mod tests {
 
         assert_eq!(fingerprint_schema(&a), fingerprint_schema(&b));
 
-        // A real structural change still shows.
         a.tables[0].columns.pop();
         assert_ne!(fingerprint_schema(&a), fingerprint_schema(&b));
     }

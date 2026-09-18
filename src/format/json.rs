@@ -1,9 +1,8 @@
 //! Canonical JSON encoding and decoding for rows.
 //!
-//! Hand-rolled rather than delegated to `serde_json::to_string` so that number
-//! formatting, key order, and escaping are all decided here, every one of them
-//! is a determinism requirement, and a serializer that "helpfully" normalises a
-//! decimal would silently corrupt money columns.
+//! Hand-rolled rather than `serde_json::to_string`: number formatting, key
+//! order and escaping are all determinism requirements here, and a serializer
+//! that normalises a decimal would corrupt money columns.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -64,14 +63,8 @@ fn encode_value(
         Value::Null => out.push_str("null"),
         Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
         Value::Int(i) => out.push_str(&i.to_string()),
-        // A decimal is emitted as a bare JSON number token holding its exact
-        // source digits, trailing zeros and all. Routing it through f64, which
-        // is what a naive encoder does, would lose precision.
-        //
-        // Anything a JSON parser would re-render differently is quoted instead,
-        // so the exact digits always survive. That covers Postgres `numeric`
-        // NaN, which is not a JSON number at all, and exponent forms, which
-        // JSON parsers normalise (`1e10` comes back as `1e+10`).
+        // Bare, keeping the exact source digits and trailing zeros. Anything a
+        // JSON parser would re-render (NaN, exponent forms) is quoted instead.
         Value::Decimal(d) if is_lossless_json_number(d) => out.push_str(d),
         Value::Decimal(d) => encode_string(out, d),
         Value::Float(f) if f.is_finite() => out.push_str(&crate::value::format_float(*f)),
@@ -83,19 +76,13 @@ fn encode_value(
             JsonMode::Unroll => {
                 let parsed: serde_json::Value = serde_json::from_str(raw)
                     .with_context(|| format!("re-reading json from column {}", col.name))?;
-                // Only objects and arrays are unrolled. A scalar at the root
-                // would become ambiguous: an unrolled JSON `null` is
-                // indistinguishable from SQL NULL, and an unrolled JSON string
-                // is indistinguishable from `json: string` mode. Since those
-                // payloads gain nothing from nesting anyway, they stay quoted,
-                // which keeps every case decodable.
+                // A scalar at the root stays quoted: unrolled, a JSON `null`
+                // would be indistinguishable from SQL NULL and a JSON string
+                // from `json: string` mode.
                 if parsed.is_object() || parsed.is_array() {
-                    // Always sorted, never conditional on `binary`. jsonb is
-                    // key-normalised server-side and plain json is not, so
-                    // keying the decision off the column class would make the
-                    // same document encode differently depending on which
-                    // engine held it, and a Postgres `json` column loaded into
-                    // a MySQL `JSON` one would re-export with reordered keys.
+                    // Sorted unconditionally, never keyed off `binary`, or the
+                    // same document would encode differently depending on which
+                    // engine held it.
                     write_json(out, &parsed, pretty, depth, true);
                 } else {
                     encode_string(out, raw);
@@ -328,13 +315,7 @@ fn kind_of(v: &serde_json::Value) -> &'static str {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Writers
-// ---------------------------------------------------------------------------
-
-/// One JSON object per line, the default format, and the one with the cleanest
-/// git diffs, since a changed row is a changed line.
-/// Either a plain file or one behind a gzip encoder.
+/// A plain file, or one behind a gzip encoder.
 ///
 /// Split rather than boxed so nothing can accidentally call `flush()` on the
 /// encoder: flate2 answers that with a `Z_SYNC_FLUSH`, which injects an empty
@@ -495,11 +476,8 @@ impl RowWriter for PerRowWriter<'_> {
         Ok(())
     }
 
-    /// Hash of hashes, in path order.
-    ///
-    /// Files are produced in row order but the rule is path order, so folding
-    /// the per-file digests is what lets this stream: retaining every file's
-    /// bytes to hash them later is exactly what streaming removes.
+    /// Hash of hashes, in path order. Files are produced in row order, so this
+    /// sorts; folding per-file digests is what lets the writer stream.
     fn finish(self: Box<Self>) -> Result<Written> {
         use sha2::Digest as _;
         let mut sorted = self.written.clone();
@@ -517,10 +495,6 @@ impl RowWriter for PerRowWriter<'_> {
         })
     }
 }
-
-// ---------------------------------------------------------------------------
-// Readers
-// ---------------------------------------------------------------------------
 
 pub fn read_jsonl(path: &Path, columns: &[&Column], compressed: bool) -> Result<Vec<Value2D>> {
     let raw =
@@ -681,10 +655,8 @@ mod tests {
             },
         )];
         let enc = |d: &str| encode(&cols, &[Value::Decimal(d.into())], JsonMode::Unroll, false);
-        // The shapes a database actually emits stay readable as numbers.
         assert_eq!(enc("1.5000"), r#"{"n":1.5000}"#);
         assert_eq!(enc("-0.0001"), r#"{"n":-0.0001}"#);
-        // The shapes a JSON parser would rewrite are quoted to protect them.
         assert_eq!(enc("1e10"), r#"{"n":"1e10"}"#);
         assert_eq!(enc("NaN"), r#"{"n":"NaN"}"#);
     }
@@ -850,9 +822,8 @@ mod tests {
 
     #[test]
     fn a_json_null_payload_stays_distinct_from_sql_null() {
-        // `'null'::jsonb` is not the same as a NULL jsonb column, and conflating
-        // them on reload would silently rewrite the row. Unrolling a bare `null`
-        // is what would cause that, so it must not happen.
+        // `'null'::jsonb` is not a NULL jsonb column; unrolling a bare `null`
+        // would conflate them and silently rewrite the row on reload.
         let cols = vec![col("j", TypeClass::Json { binary: true })];
 
         let sql_null = encode(&cols, &[Value::Null], JsonMode::Unroll, false);
@@ -902,7 +873,6 @@ mod tests {
 
     #[test]
     fn composite_payloads_still_unroll() {
-        // The whole point of unroll mode: objects and arrays stay readable.
         let cols = vec![col("j", TypeClass::Json { binary: true })];
         for (raw, expected) in [
             (r#"{"a":1}"#, r#"{"j":{"a":1}}"#),
@@ -910,7 +880,6 @@ mod tests {
             (r#"[{"a":1}]"#, r#"{"j":[{"a":1}]}"#),
         ] {
             let out = encode(&cols, &[Value::Json(raw.into())], JsonMode::Unroll, false);
-            // Nested, so no escaped quotes anywhere in the payload.
             assert_eq!(out, expected, "{raw} should be nested");
             assert!(!out.contains('\\'), "{raw} came out escaped: {out}");
         }
@@ -941,7 +910,6 @@ mod tests {
         encode_string(&mut s, "héllo 🌱");
         assert_eq!(s, "\"héllo 🌱\"");
 
-        // Other control characters take the \u form.
         let mut s = String::new();
         encode_string(&mut s, "\u{1}");
         assert_eq!(s, "\"\\u0001\"");
@@ -1001,7 +969,6 @@ mod tests {
             decode_row(&refs, r#"{"flag":0}"#, "test").unwrap(),
             vec![Value::Bool(false)]
         );
-        // A number that is not 0 or 1 is not a boolean in disguise.
         assert!(decode_row(&refs, r#"{"flag":7}"#, "test").is_err());
     }
 
@@ -1084,8 +1051,6 @@ mod tests {
             );
         }
     }
-
-    // -- writers ------------------------------------------------------------
 
     fn table_with_pk(pk: &[&str], cols: &[Column]) -> Table {
         Table {
@@ -1184,8 +1149,7 @@ mod tests {
 
     #[test]
     fn per_row_slug_collisions_get_a_suffix_rather_than_overwriting() {
-        // Two distinct keys can sanitise to the same slug; losing a row to a
-        // silent overwrite would be the worst possible outcome.
+        // Two distinct keys can sanitise to the same slug.
         let cols = vec![col("id", TypeClass::Text { max_len: None })];
         let table = table_with_pk(&["id"], &cols);
         let refs: Vec<&Column> = cols.iter().collect();
@@ -1234,9 +1198,8 @@ mod tests {
 
     #[test]
     fn per_row_content_hash_is_order_independent_but_content_sensitive() {
-        // Files are written in row order but hashed in path order, so the fold
-        // has to sort. Losing that would make the recorded hash depend on which
-        // row happened to come first.
+        // Files are written in row order but hashed in path order, so the
+        // fold has to sort.
         let cols = vec![col("id", TypeClass::Int { bits: 32 })];
         let table = table_with_pk(&["id"], &cols);
         let hash = |rows: &[i64]| {

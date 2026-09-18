@@ -1,10 +1,8 @@
 //! BSON in and out of [`crate::value::Value`].
 //!
-//! No new `Value` or `TypeClass` variants: `Raw` already means "carried
-//! verbatim, lossless because the write path rebuilds it from the same text",
-//! and `Other` already means "modelled by nobody, no widening rules". That is
-//! exactly what ObjectId, Timestamp and Regex need, so they use it, and nested
-//! documents keep their Extended JSON inside a `Json`.
+//! ObjectId, Timestamp and Regex need no new variants: `Raw` already means
+//! "carried verbatim, rebuilt from the same text" and `Other` means "modelled
+//! by nobody". Nested documents keep their Extended JSON inside a `Json`.
 
 use anyhow::{Context, Result, bail};
 use bson::{Binary, Bson, Document, spec::BinarySubtype};

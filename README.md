@@ -1,26 +1,22 @@
 # GraineSQL
 
-Export selected rows and storage buckets from a database into deterministic,
-diffable seed files. Load them back into another database in foreign-key order.
+Export selected rows (and Supabase storage buckets) into deterministic, diffable
+seed files, and load them back into another database in foreign-key order.
 
 ```
 graine export                 # prod  -> seed/*.jsonl + buckets/   (commit these)
 graine load --source dev      # files -> dev database and its buckets
 ```
 
-A `graine.lock` file records the schema the seed files were written against.
-Every command checks the live database against it and **aborts on breaking drift
-before touching anything**, so a schema change surfaces as a readable diff rather
-than a half-applied load.
-
-## Why not `pg_dump`
+`graine.lock` records the schema the seed files were written against. Every
+command checks the live database against it and stops on breaking drift before
+touching anything.
 
 `pg_dump --data-only` is whole-database, has no per-table filtering, and its row
 order is unspecified, so committing it produces diff noise on every run.
 Hand-written seed SQL diffs cleanly but rots silently when the schema moves.
-
 GraineSQL exports the tables you name, filtered how you say, byte-identically run
-to run, and refuses to run when the schema no longer matches the files.
+to run.
 
 ## Install
 
@@ -28,17 +24,16 @@ to run, and refuses to run when the schema no longer matches the files.
 brew install nathanduboisset/tap/grainesql   # macOS and Linux
 cargo binstall grainesql                     # prebuilt binary, no compile
 cargo install grainesql                      # from source
-cargo install grainesql --features mongo     # and with MongoDB support
+cargo install grainesql --features mongo     # with MongoDB support
 ```
 
-MongoDB is optional because it adds roughly sixty crates, and the relational
-binary most people install should not carry them.
+MongoDB is optional because it pulls in around sixty extra crates.
 
-Or download a binary from [Releases](https://github.com/NathanDuboisset/grainesql/releases);
-each archive ships a `.sha256`.
+Binaries are also on [Releases](https://github.com/NathanDuboisset/grainesql/releases),
+each with a `.sha256`.
 
-Needs Rust 1.88+ to build. Postgres 12+, Supabase, MySQL 8+ or SQLite at
-runtime.
+Building needs Rust 1.88+. At runtime: Postgres 12+, Supabase, MySQL 8+, SQLite,
+or MongoDB.
 
 ## Getting started
 
@@ -47,7 +42,7 @@ graine init --url postgres://localhost/myapp   # writes graine.yaml, lists table
 $EDITOR graine.yaml                            # trim to the tables you want
 graine lock                                    # snapshot the schema
 graine export                                  # write seed/
-git add seed/                                  # commit
+git add seed/
 ```
 
 Then in a fresh environment:
@@ -117,13 +112,13 @@ Per-table keys: `where`, `order_by`, `limit`, `columns`, `exclude_columns`,
 
 ### Sources
 
-Credentials never live in `graine.yaml`. A source reads them from either an
-`env_file` it names or, with `process_env: true`, the process environment. An
-`env_file` still falls back to the environment for a variable it does not
-contain, which is how CI usually supplies them.
+Credentials never live in `graine.yaml`. A source reads them from an `env_file`
+it names, or from the process environment with `process_env: true`. An
+`env_file` falls back to the environment for any variable it does not contain,
+which is how CI usually supplies them.
 
-`url_var` names the variable holding the connection URL; it defaults to
-`DATABASE_URL`, or to `SUPABASE_DB_URL` then `DATABASE_URL` for
+`url_var` names the variable holding the connection URL. It defaults to
+`DATABASE_URL`, or to `SUPABASE_DB_URL` then `DATABASE_URL` under
 `engine: supabase`.
 
 Exactly one source may be `default: true`. `read_only: true` makes `load` refuse
@@ -162,31 +157,12 @@ the key in `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_SECRET_KEY` or
 | `graine plan` | Load order, row counts, per-table action. Writes nothing |
 | `graine plan --tree` | The same, drawn as a dependency tree |
 | `graine load` | Push seed files into a database |
-| `graine verify` | Re-hash the seed files and bucket objects against the lock. Needs no network |
+| `graine verify` | Re-hash the seed files and bucket objects against the lock |
 | `graine completions SHELL` | Print a completion script |
 
 Global flags: `--config`, `--source`, `--json`, `-v`, `-q`, `-y`.
 `--tables a,b` narrows `export`, `plan` and `load`; `--buckets a,b` and
 `--no-buckets` do the same for storage.
-
-`add` reports how each table arrived:
-
-```
-$ graine add orgs --with-children
-added 5 tables to graine.yaml
-  named     orgs
-  children  users, memberships, orders  (2 levels deep)
-  parents   plans  (needed to load the above)
-```
-
-The parents make a slice loadable; the children make it useful. Downward is the
-unbounded direction, though — a couple of hops off a central table can reach most
-of a schema — so `--depth N` bounds it, and a walk that adds a lot of tables
-shows the list and asks first.
-
-A long `export` draws a progress line on stderr, on a terminal only: `-v` prints
-a scrolling line per table instead, and under `--json`, `-q`, or any non-terminal
-stderr nothing is drawn at all, so CI logs and piped output stay clean.
 
 ```
 $ graine plan --tree
@@ -199,6 +175,24 @@ public.orgs  3 rows
 4 tables, 12 rows total
 ```
 
+`add` reports how each table arrived:
+
+```
+$ graine add orgs --with-children
+added 5 tables to graine.yaml
+  named     orgs
+  children  users, memberships, orders  (2 levels deep)
+  parents   plans  (needed to load the above)
+```
+
+Downward is the unbounded direction, since a couple of hops off a central table
+can reach most of a schema, so `--depth N` bounds it and a walk that adds a lot
+of tables shows the list and asks first.
+
+A long `export` draws a progress line on stderr when stderr is a terminal. Under
+`-v` it prints a scrolling line per table instead, and under `--json`, `-q` or a
+non-terminal stderr it draws nothing.
+
 Completions install the usual way:
 
 ```sh
@@ -209,10 +203,9 @@ graine completions fish > ~/.config/fish/completions/graine.fish
 
 ### Referential completeness
 
-A per-table `where` can orphan rows in another table, and the failure would
-otherwise surface as a foreign-key violation partway through a load. `export`
-checks every foreign key in the export against the export and aborts if any
-value has no matching parent row:
+A per-table `where` can orphan rows in another table, which would otherwise
+surface as a foreign-key violation partway through a load. `export` checks every
+foreign key in the export against the export:
 
 ```
 $ graine export
@@ -222,17 +215,15 @@ error: the export is not referentially complete:
     widen the filter on public.users, or narrow the one on public.orders
 ```
 
-`--no-fk-check` skips it. `--follow-parents` fixes it instead: it walks the
-foreign-key graph and pulls in the missing parent rows, widening that parent's
-own `where` where it has to, and says which tables gained rows. Off by default,
-since it overrides a filter you wrote deliberately.
+`--no-fk-check` skips the check. `--follow-parents` fixes the export instead,
+walking the foreign-key graph, pulling in the missing parent rows and reporting
+which tables gained rows. Off by default, since it overrides a filter you wrote.
 
-### Schema drift you have already accepted
+### Drift you have already accepted
 
-A change that only loses data prompts rather than aborting, and the prompt has a
-third answer: accept and stop asking about this table. That is recorded in
-`graine.lock`, so it is committed and reviewed like any other decision rather
-than living in one developer's home directory.
+A change that only loses data prompts instead of aborting, and the prompt has a
+third answer: accept and stop asking about this table. The answer is recorded in
+`graine.lock`, so it gets committed and reviewed like any other decision.
 
 ```
 public.orders.legacy_ref: column dropped (was text).
@@ -240,50 +231,46 @@ public.orders.legacy_ref: column dropped (was text).
 ```
 
 `graine diff` lists what is remembered; `graine diff --forget orders` drops it.
-`--yes` accepts without remembering, since it is a CI switch rather than a
-decision. For a table whose schema churns constantly, `on_drift: ignore` is
-better than answering every time, and better than `--force`, which would
-disable the check everywhere.
+`--yes` accepts without remembering, being a CI switch rather than a decision.
+For a table whose schema churns constantly, `on_drift: ignore` beats answering
+every time, and is narrower than `--force`, which disables the check everywhere.
 
 ### MongoDB
 
 A collection is a table, a field is a column, `_id` is the primary key, and the
-database is the schema. Two consequences fall out of that and are not
-limitations so much as what Mongo is:
+database is the schema. Two things follow:
 
-- **There is no load order.** Mongo enforces no references, so the topological
-  sort degenerates to alphabetical and the referential check has nothing to
-  check.
-- **The contract is weaker, and only sometimes.** A collection with a
-  `$jsonSchema` validator is a real contract, so its fields become real columns
-  and every drift rule applies to them. A collection without one is described by
-  an inferred profile — which fields a sample held, and of which BSON types —
-  and that is recorded but can never fail a load. In Mongo a new field is
-  normal; treating an observation as a guarantee would make the lock lie.
+- There is no load order. Mongo enforces no references, so the topological sort
+  degenerates to alphabetical and the referential check has nothing to check.
+- The contract is weaker, and only sometimes. A collection with a `$jsonSchema`
+  validator is a real contract: its fields become real columns and every drift
+  rule applies. A collection without one is described by an inferred profile
+  (which fields a sample held, and of which BSON types), which is recorded but
+  can never fail a load. A new field is normal in Mongo, and treating an
+  observation as a guarantee would make the lock lie.
 
-The sample is `find().sort({_id: 1}).limit(1000)`, never `$sample`: a randomised
-sample would make the lock flap and `lock --check` useless in CI.
+The sample is `find().sort({_id: 1}).limit(1000)`, never `$sample`, which would
+make the lock flap and `lock --check` useless in CI.
 
-BSON carries types JSON cannot. ObjectId, Decimal128, Binary, Date, Timestamp
-and Regex round-trip as themselves rather than collapsing into strings, and a
-nested document keeps its Extended JSON, so `{"$oid": ...}` stays an ObjectId
-on reload.
+ObjectId, Decimal128, Binary, Date, Timestamp and Regex round-trip as themselves
+instead of collapsing into strings, and a nested document keeps its Extended
+JSON.
 
-Three differences worth knowing:
+Three differences:
 
 - `where:` is a filter document, not SQL: `where: '{"status": {"$ne": "draft"}}'`.
 - `format: sql` is refused. There is no dialect to generate it with.
 - A load runs in a transaction, which needs a replica set or mongos. Against a
-  standalone `mongod` it refuses rather than silently dropping atomicity; pass
+  standalone `mongod` it refuses instead of silently dropping atomicity; pass
   `--no-transaction` to accept a partial load.
 
-As everywhere else, GraineSQL moves data and never schema: validators and
+As everywhere else, GraineSQL moves data and never schema. Validators and
 indexes belong to your migrations, so create them on the target first.
 
 ## Storage buckets
 
-Object storage is the half of a Supabase project a SQL dump cannot capture. Point
-a source at its storage service and list the buckets:
+Object storage is the half of a Supabase project a SQL dump cannot capture.
+Point a source at its storage service and list the buckets:
 
 ```yaml
 sources:
@@ -314,18 +301,16 @@ The manifest carries a sha256 per object, and `graine.lock` records one hash
 over the manifest, so a single value covers every byte in the bucket.
 `graine verify` re-hashes every object from disk with no network access.
 
-Bucket *settings* (public, size limit, allowed mime types) are schema, created by
+Bucket settings (public, size limit, allowed mime types) are schema, created by
 migrations. GraineSQL records them in `graine.lock` to check against and never
-writes them: **a bucket that does not exist in the target is an error, not
-something GraineSQL creates.**
+writes them. A bucket missing from the target is an error, not something
+GraineSQL creates.
 
 Loading uploads with upsert, after the database transaction commits. Object
-storage has no transaction to join, so uploading earlier could leave files behind
-for rows that were then rolled back. A local file whose hash no longer matches
-the manifest is refused rather than pushed.
-
-Object keys containing `..`, a leading `/`, or a backslash are refused rather
-than rewritten, so a key cannot write outside the seed directory.
+storage has no transaction to join, so uploading earlier could leave files
+behind for rows that were then rolled back. A local file whose hash no longer
+matches the manifest is refused, and a key containing `..`, a leading `/` or a
+backslash is refused, so it cannot write outside the seed directory.
 
 ## Schema drift
 
@@ -373,25 +358,24 @@ needs confirmation:
 2 breaking, 1 needing confirmation, 0 benign. Review, then re-run `graine lock` to accept.
 ```
 
-`graine lock` accepts the change; `--force` proceeds without it.
-
-`export` judges the source against the lock, `load` judges the target: each
-checks the database it is about to act on.
+`graine lock` accepts the change; `--force` proceeds without it. `export` judges
+the source against the lock and `load` judges the target, so each checks the
+database it is about to act on.
 
 ## Determinism
 
-These are enforced by the test suite, not just intended:
+Enforced by the test suite, not just intended:
 
 1. **Total row ordering.** The generated `SELECT` always ends in a total order:
    your `order_by`, then the primary key, then every remaining column. Ordering
    by a non-unique column alone leaves ties, and ties resolve differently run to
    run.
-2. **Pinned collation.** Text ordering uses an explicit binary collation, because
+2. **Pinned collation.** Text ordering uses an explicit binary collation, since
    the default collation is a per-database property.
 3. **The lock decides column order,** not the live database, so two databases
-   holding the same columns in different physical order still export identically.
-4. **Canonical values.** Shortest round-trip floats; decimals kept as exact digit
-   strings, never through `f64`; timestamps normalised to UTC with fixed
+   holding the same columns in different physical order export identically.
+4. **Canonical values.** Shortest round-trip floats; decimals kept as exact
+   digit strings, never through `f64`; timestamps normalised to UTC with fixed
    fractional precision; bytes as lowercase `\x` hex; intervals as ISO 8601.
 5. **Pinned session.** Reads run with `TimeZone=UTC`, `IntervalStyle=iso_8601`,
    `bytea_output=hex`, `DateStyle=ISO`, so no server or role setting can change
@@ -403,21 +387,20 @@ These are enforced by the test suite, not just intended:
 
 ## Formats
 
-**jsonl** (default), one object per row. Best fidelity, cleanest diffs, since a
-changed row is a changed line. `json: unroll` nests json columns instead of
+**jsonl** (default), one object per row. Best fidelity and cleanest diffs, since
+a changed row is a changed line. `json: unroll` nests json columns instead of
 escaping them.
 
-**csv**: for interop. CSV cannot natively distinguish `NULL` from the empty
-string, so GraineSQL uses the Postgres `COPY ... CSV` convention, which round-trips:
+**csv**, for interop. CSV cannot natively distinguish `NULL` from the empty
+string, so GraineSQL uses the Postgres `COPY ... CSV` convention, which
+round-trips: an unquoted empty field is `NULL`, and a quoted empty field (`""`)
+is the empty string.
 
-> an **unquoted** empty field is `NULL`; a **quoted** empty field (`""`) is the
-> empty string.
+**sql**, batched `INSERT` statements with dialect-correct quoting and conflict
+clauses, runnable through `psql` or `mysql`. `load` reads back the shape
+GraineSQL writes and rejects anything else instead of guessing.
 
-**sql**: batched `INSERT` statements with dialect-correct quoting and conflict
-clauses, runnable through `psql` or `mysql`. `load` reads them back, accepting
-the shape GraineSQL writes and rejecting anything else rather than guessing.
-
-**`layout: per_row`**: one `.json` file per row, named from the primary key, in
+**`layout: per_row`**, one `.json` file per row, named from the primary key, in
 a directory named after the table. For small hand-edited tables where a
 one-line-per-row diff is unreadable. `pretty: true` applies here only; jsonl is
 one line per row by definition.
@@ -433,31 +416,30 @@ Per-table modes:
   converges on the file contents.
 - `insert`, plain insert; a conflict aborts.
 - `skip_existing`, ignore rows that already exist.
-- `truncate_first`, empty the table first. Emptying happens as one pass in
-  reverse foreign-key order, children before parents.
+- `truncate_first`, empty the table first, as one pass in reverse foreign-key
+  order, children before parents.
 
-`DELETE FROM` rather than `TRUNCATE`: Postgres refuses to truncate a table any
-foreign key references even when the referencing table is empty, and MySQL's
-`TRUNCATE` commits implicitly, which would break atomicity.
+Emptying uses `DELETE FROM` rather than `TRUNCATE`: Postgres refuses to truncate
+a table any foreign key references even when the referencing table is empty, and
+MySQL's `TRUNCATE` commits implicitly, which would break atomicity.
 
 After loading a serial/identity key, the sequence is advanced past the loaded
-rows, so the application's next insert does not collide.
+rows so the application's next insert does not collide.
 
 Confirmation is required when the target is not local or the plan destroys rows.
-`--yes` skips it, `--dry-run` shows the row-level diff and commits nothing.
+`--yes` skips it; `--dry-run` shows the row-level diff and commits nothing.
 
-Rows go in as multi-row `INSERT`s, `load.batch` at a time, on every engine and in
-every mode. The size is capped per engine so a statement stays inside the
-bind-parameter limit, which on SQLite is the binding constraint for wide tables.
-Postgres keeps `COPY` for `insert` and `truncate_first`, being faster still;
-`upsert` and `skip_existing` cannot use it, having nowhere to put a conflict
-clause. If a batch fails, its rows are replayed one at a time so the error names
-the offending row rather than a batch of five hundred; `load.batch: 1` restores
-that precision everywhere.
+Rows go in as multi-row `INSERT`s, `load.batch` at a time, on every engine and
+in every mode. The size is capped per engine to stay inside the bind-parameter
+limit, which on SQLite binds first for wide tables. Postgres keeps `COPY` for
+`insert` and `truncate_first`, being faster still; `upsert` and `skip_existing`
+have nowhere to put a conflict clause, so they cannot use it. A failed batch is
+replayed one row at a time so the error names the offending row instead of a
+batch of five hundred, and `load.batch: 1` restores that precision everywhere.
 
 Foreign-key cycles are detected and named. Postgres can load one only when every
 constraint in it is `DEFERRABLE`, in which case GraineSQL defers them for the
-transaction; otherwise it says so. A self-reference is not a cycle.
+transaction. A self-reference is not a cycle.
 
 ## CI
 
@@ -481,16 +463,14 @@ cargo test --test buckets
 ```
 
 The integration tests create and drop their own databases and buckets, and skip
-rather than fail when those variables are unset. The most valuable one is
-`export_then_load_then_export_is_byte_identical`: it exercises every encoder and
-decoder at once and fails on any asymmetry between them.
+when those variables are unset.
 
 ## Limitations
 
-- Export streams: rows are read and written one at a time, so a table's size does
-  not bound memory. Loading still reads each file in full, because the pre-flight
-  checks (duplicate keys, nulls in NOT NULL columns) need the whole file before
-  the transaction opens — and failing before it opens is the point.
+- Export streams rows one at a time, so a table's size does not bound memory.
+  Loading still reads each file in full, because the pre-flight checks
+  (duplicate keys, nulls in NOT NULL columns) need the whole file before the
+  transaction opens.
 - `.sql` output cannot be read back.
 - MySQL uses multi-row `INSERT` rather than `LOAD DATA LOCAL INFILE`. sqlx does
   not negotiate the `LOCAL_FILES` capability and leaves the server's
@@ -500,25 +480,13 @@ decoder at once and fails on any asymmetry between them.
   `max_object_bytes` (default 25 MiB) guards against pulling something into git
   that does not belong there.
 - Supabase Storage rejects non-ASCII object keys itself, so those cannot occur.
-- In `json: unroll` mode, a json column whose value is a bare scalar (`null`,
-  a number, a string) is written quoted rather than nested. Unrolling those would
-  make a JSON `null` indistinguishable from SQL `NULL`, which would silently
-  rewrite the row on reload. Objects and arrays, the cases that benefit, nest
-  normally.
-- Postgres `numeric` NaN and exponent-form decimals are written as quoted strings
-  in JSON, since neither survives a JSON number token unchanged.
+- Under `json: unroll`, a json column whose value is a bare scalar (`null`, a
+  number, a string) is written quoted rather than nested. Unrolling those would
+  make a JSON `null` indistinguishable from SQL `NULL` and silently rewrite the
+  row on reload. Objects and arrays, the cases that benefit, nest normally.
+- Postgres `numeric` NaN and exponent-form decimals are written as quoted
+  strings in JSON, since neither survives a JSON number token unchanged.
 
 ## Licence
 
-[PolyForm Noncommercial 1.0.0](LICENSE), **source-available, not open source**.
-
-Use it freely for anything that is not for commercial advantage or monetary
-compensation: personal projects, research, education, evaluation. Using it in or
-for a business needs a separate licence; open an issue to ask.
-
-Practical consequences worth knowing:
-
-- `cargo install --git` and prebuilt binaries work as normal.
-- crates.io accepts a custom licence file, but the crate will not show an
-  OSI-approved licence, and some corporate policies auto-reject that.
-- Homebrew *core* will not accept a non-OSI formula; the personal tap is fine.
+[MIT](LICENSE).

@@ -642,14 +642,10 @@ impl PinnedConn<'_> {
         }
     }
 
-    /// Stream `data` into a `COPY ... FROM STDIN` statement.
-    ///
-    /// Postgres only; the other engines have no equivalent that works over a
-    /// pooled connection without server-side file access.
-    /// Stream a CSV payload into `COPY ... FROM STDIN`.
+    /// Stream a CSV payload into `COPY ... FROM STDIN`. Postgres only.
     ///
     /// `chunks` is pulled lazily so the whole payload is never in memory at
-    /// once, which for a large table is the entire point of streaming.
+    /// once.
     pub async fn copy_in<I>(&mut self, sql: &str, chunks: I) -> Result<u64>
     where
         I: IntoIterator<Item = Result<Vec<u8>>>,
@@ -778,8 +774,8 @@ mod tests {
 
     #[test]
     fn prune_reports_missing_tables_instead_of_raising() {
-        // A dropped table has to reach drift classification, which explains it
-        // far better than a bare "does not exist" from here.
+        // A dropped table has to reach drift classification, which explains
+        // it; a bare "does not exist" from here would not.
         let schema = Schema {
             default_schema: "public".into(),
             tables: IndexMap::new(),

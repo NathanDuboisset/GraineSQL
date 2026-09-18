@@ -144,8 +144,8 @@ fn find_cycles(
         if visited.contains(start) {
             continue;
         }
-        // Walk parent edges from `start`, staying inside `stuck`, until we
-        // revisit a node on the current path, that closes a cycle.
+        // Walk parent edges from `start`, staying inside `stuck`, until a node
+        // on the current path repeats, which closes a cycle.
         let mut path: Vec<TableId> = Vec::new();
         let mut on_path: BTreeSet<TableId> = BTreeSet::new();
         let mut cursor = start.clone();
@@ -331,7 +331,6 @@ mod tests {
         let cycle = &o.cycles[0];
         assert_eq!(cycle.tables.len(), 2);
         assert!(!cycle.all_deferrable);
-        // Every table still appears in the output so the caller can report fully.
         assert_eq!(o.tables.len(), 2);
     }
 
@@ -405,7 +404,6 @@ mod tests {
         let s = schema(&[("orders", &[("users", false)]), ("users", &[])]);
         let o = topological(&s, &[TableId::bare("orders"), TableId::bare("users")]);
         assert_eq!(names(&o.tables), ["users", "orders"]);
-        // And the output is canonicalised to the qualified form.
         assert!(
             o.tables
                 .iter()

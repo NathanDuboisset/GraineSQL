@@ -1,65 +1,15 @@
-//! MongoDB support: the shape, and what still has to be decided.
+//! MongoDB support.
 //!
-//! Nothing here talks to a server yet. What exists is the mapping from Mongo's
-//! model onto GraineSQL's, worked out far enough to show where it fits and where it
-//! does not, with the open questions written down rather than guessed at.
+//! A collection is a table, a top-level field is a column, `_id` is the primary
+//! key, and the database is the schema. There are no foreign keys, so load order
+//! degenerates to alphabetical and the referential check has nothing to check.
 //!
-//! # How it maps
+//! A [`$jsonSchema` validator][v] is a contract and gets real columns that every
+//! drift rule applies to. A collection without one gets a [`FieldProfile`],
+//! which is recorded but can never fail a load: in Mongo a new field is normal,
+//! and treating an observation as a guarantee would make the lock lie.
 //!
-//! | GraineSQL | MongoDB |
-//! |---|---|
-//! | table | collection |
-//! | column | field, at the top level of a document |
-//! | primary key | `_id` |
-//! | foreign key | nothing; references are a convention, not a constraint |
-//! | schema (`public`) | database |
-//! | enum type | a validator's `enum` keyword |
-//!
-//! Two consequences fall out of that:
-//!
-//! - **Load order does not exist.** There are no foreign keys to order by, so
-//!   [`crate::order::topological`] degenerates to alphabetical, and the
-//!   referential closure check has nothing to check. That is correct, not a
-//!   limitation: Mongo genuinely does not enforce references.
-//! - **The drift contract is weaker.** A relational lock records what the
-//!   database *guarantees*. A collection with no validator guarantees nothing,
-//!   so a lock can only record what was *observed*.
-//!
-//! # What counts as the schema when there is no schema
-//!
-//! Decided: a validator is a contract, an inferred profile is not.
-//!
-//! A collection may carry a [JSON Schema validator], in which case it is a real
-//! contract and drift classification works exactly as it does for a table:
-//! a removed property is breaking, a widened `bsonType` is benign, and so on.
-//!
-//! Most collections do not. For those the only available contract is an
-//! inferred profile: which fields were seen, with which BSON types, in what
-//! proportion of documents. [`FieldProfile`] is that. The question is what to do
-//! with it, and it is a policy decision rather than a technical one:
-//!
-//! - Treating a profile as a contract makes `graine load` fail when a field the
-//!   seed files never saw appears. That is wrong: in Mongo, a new field is
-//!   normal and breaks nothing.
-//! - Treating it as advisory makes the lock decorative for most collections,
-//!   which undercuts the reason the lock exists.
-//!
-//! So profiles are recorded and reported as benign drift, and only validator
-//! changes can be breaking. That keeps the guarantee honest, which matters more
-//! than making every collection look locked.
-//!
-//! # What is genuinely hard
-//!
-//! BSON carries types JSON cannot: `ObjectId`, `Decimal128`, `Binary`, `Date`,
-//! `Timestamp`, `Regex`, `Long`. Writing them as plain JSON would lose the
-//! distinction between an `ObjectId` and the string that spells it, so the seed
-//! files have to use [Extended JSON] (`{"$oid": "..."}`), and [`crate::value`]
-//! needs to round-trip it. That is the real work, and it is the same fidelity
-//! problem the relational side already solved: the tests to write are the same
-//! shape as the ones in `value.rs`.
-//!
-//! [JSON Schema validator]: https://www.mongodb.com/docs/manual/core/schema-validation/
-//! [Extended JSON]: https://www.mongodb.com/docs/manual/reference/mongodb-extended-json/
+//! [v]: https://www.mongodb.com/docs/manual/core/schema-validation/
 
 #[cfg(feature = "mongo")]
 pub mod data;
@@ -75,10 +25,7 @@ pub use introspect::{database_name, introspect, list_collections};
 
 use crate::schema::TypeClass;
 
-/// What a collection's documents were observed to contain.
-///
-/// Recorded per field, from a sample rather than a full scan, so it describes a
-/// collection without claiming to constrain it.
+/// What a collection's documents were observed to contain, from a sample.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldProfile {
     pub name: String,
@@ -91,24 +38,17 @@ pub struct FieldProfile {
 }
 
 impl FieldProfile {
-    /// Whether every sampled document had this field.
-    ///
     /// Never a guarantee: the sample may have missed a document without it.
     pub fn always_present(&self) -> bool {
         self.sampled > 0 && self.present == self.sampled
     }
 
-    /// Whether the field held more than one BSON type.
     pub fn polymorphic(&self) -> bool {
         self.bson_types.len() > 1
     }
 }
 
 /// Map a BSON type name onto GraineSQL's classification.
-///
-/// Used for both validator `bsonType` keywords and observed types. A field with
-/// several types has no single class, so callers pass each in turn and treat a
-/// polymorphic field as [`TypeClass::Json`].
 pub fn classify(bson_type: &str) -> TypeClass {
     match bson_type {
         "bool" => TypeClass::Bool,
@@ -132,15 +72,12 @@ pub fn classify(bson_type: &str) -> TypeClass {
             name: "regex".into(),
         },
         "uuid" => TypeClass::Uuid,
-        // A BSON date is milliseconds since the epoch in UTC, so it is an
-        // instant rather than a wall clock.
+        // Milliseconds since the epoch in UTC: an instant, not a wall clock.
         "date" => TypeClass::Timestamp { tz: true },
         // A BSON Timestamp is an internal replication type, not an instant.
         "timestamp" => TypeClass::Other {
             name: "timestamp".into(),
         },
-        // Nested documents and arrays are carried as JSON, the same way a
-        // relational jsonb column is.
         "object" | "array" => TypeClass::Json { binary: true },
         "null" | "undefined" => TypeClass::Json { binary: true },
         other => TypeClass::Other {
@@ -152,8 +89,7 @@ pub fn classify(bson_type: &str) -> TypeClass {
 /// The class to record for a field, given every BSON type it was seen holding.
 ///
 /// A field that is sometimes a string and sometimes a number has no narrower
-/// class than "some JSON value", and pretending otherwise would make the lock
-/// claim a guarantee that does not hold.
+/// class than "some JSON value".
 pub fn class_for(bson_types: &[String]) -> TypeClass {
     // `null` alongside one real type just means the field is nullable.
     let mut real: Vec<&String> = bson_types
@@ -179,22 +115,17 @@ mod tests {
         assert_eq!(classify("int"), TypeClass::Int { bits: 32 });
         assert_eq!(classify("long"), TypeClass::Int { bits: 64 });
         assert_eq!(classify("double"), TypeClass::Float { bits: 64 });
-        // Decimal128 must not become a float, for the same reason a SQL
-        // numeric must not.
         assert!(matches!(classify("decimal"), TypeClass::Decimal { .. }));
     }
 
     #[test]
     fn a_bson_date_is_an_instant_but_a_timestamp_is_not() {
         assert_eq!(classify("date"), TypeClass::Timestamp { tz: true });
-        // A BSON Timestamp is a replication counter, not a point in time.
         assert!(matches!(classify("timestamp"), TypeClass::Other { .. }));
     }
 
     #[test]
     fn an_object_id_is_carried_verbatim_not_as_a_string() {
-        // As `Text` the write path would store a string `_id`, which is a
-        // different document and breaks upsert.
         assert!(matches!(classify("objectId"), TypeClass::Other { .. }));
         assert!(matches!(classify("regex"), TypeClass::Other { .. }));
     }
@@ -217,7 +148,6 @@ mod tests {
 
     #[test]
     fn a_nullable_field_keeps_its_underlying_class() {
-        // null alongside one real type means nullable, not polymorphic.
         assert_eq!(
             class_for(&["string".into(), "null".into()]),
             TypeClass::Text { max_len: None }
@@ -226,8 +156,6 @@ mod tests {
 
     #[test]
     fn a_polymorphic_field_has_no_narrower_class_than_json() {
-        // Claiming otherwise would make the lock assert a guarantee that does
-        // not hold.
         assert_eq!(
             class_for(&["string".into(), "int".into()]),
             TypeClass::Json { binary: true }

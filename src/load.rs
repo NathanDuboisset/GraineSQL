@@ -737,8 +737,6 @@ mod tests {
         );
     }
 
-    // -- key resolution -----------------------------------------------------
-
     #[test]
     fn key_defaults_to_the_primary_key() {
         assert_eq!(
@@ -751,7 +749,6 @@ mod tests {
     fn key_override_must_be_backed_by_a_constraint() {
         let mut c = cfg(LoadMode::Upsert);
         c.key = Some(vec!["email".into()]);
-        // Backed by a unique constraint: fine.
         assert_eq!(upsert_key(&users(), &c).unwrap(), ["email"]);
 
         // Not backed by anything: rejected here, with the real constraints
@@ -777,8 +774,6 @@ mod tests {
                 .contains("ghost")
         );
     }
-
-    // -- row validation -----------------------------------------------------
 
     #[test]
     fn a_null_in_a_not_null_column_is_caught_before_the_transaction_opens() {
@@ -848,8 +843,6 @@ mod tests {
         assert!(validate_rows(&t, &refs(&t), &[], &cfg(LoadMode::Upsert)).is_ok());
     }
 
-    // -- sequences and constraints -----------------------------------------
-
     #[test]
     fn identity_columns_get_a_sequence_fixup() {
         let fixups = Postgres.sequence_fixups(&users());
@@ -913,8 +906,6 @@ mod tests {
         assert_eq!(Postgres.restore_constraints(), None);
         assert_eq!(Sqlite.restore_constraints(), None);
     }
-
-    // -- guard rails --------------------------------------------------------
 
     fn source(name: &str, url: &str, read_only: bool) -> crate::source::ResolvedSource {
         crate::source::ResolvedSource {
@@ -1134,7 +1125,6 @@ mod batch_tests {
         // SQLite's 999 is the binding constraint at 20 columns.
         assert_eq!(rows_per_batch(Engine::Sqlite, 20, 500).unwrap(), 49);
         assert_eq!(rows_per_batch(Engine::Postgres, 20, 500).unwrap(), 500);
-        // Never zero, however wide the table.
         assert_eq!(rows_per_batch(Engine::Sqlite, 900, 500).unwrap(), 1);
         // And a table wider than the cap cannot be loaded at all.
         assert!(rows_per_batch(Engine::Sqlite, 1_000, 500).is_err());

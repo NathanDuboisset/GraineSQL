@@ -167,10 +167,6 @@ impl Value {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Parsing helpers
-// ---------------------------------------------------------------------------
-
 fn parse_bool(s: &str) -> Result<bool> {
     // Postgres emits t/f, MySQL emits 1/0, our own files emit true/false.
     match s.trim() {
@@ -351,10 +347,6 @@ fn parse_offset_seconds(off: &str) -> Result<i32> {
     Ok(sign * (hours * 3600 + minutes * 60 + seconds))
 }
 
-// ---------------------------------------------------------------------------
-// Canonical formatting
-// ---------------------------------------------------------------------------
-
 /// Shortest representation that round-trips back to the same `f64`.
 pub fn format_float(f: f64) -> String {
     if f.is_nan() {
@@ -449,7 +441,6 @@ mod tests {
     fn round_trip(class: &TypeClass, text: &str) -> String {
         let v = Value::parse(class, Some(text)).unwrap_or_else(|e| panic!("parse {text:?}: {e}"));
         let out = v.to_text().expect("non-null value has text");
-        // A second pass must be a fixed point.
         let again = Value::parse(class, Some(&out)).unwrap();
         assert_eq!(
             again.to_text().unwrap(),
@@ -636,7 +627,6 @@ mod tests {
             round_trip(&c, "2024-01-01 12:00:00-05:30"),
             "2024-01-01T17:30:00"
         );
-        // Still rejects what is genuinely not a timestamp.
         assert!(Value::parse(&c, Some("not a time")).is_err());
     }
 
@@ -762,7 +752,6 @@ mod tests {
         let b = Value::Text(format!("{}y", "x".repeat(199))).to_slug();
         assert!(a.len() <= 49, "slug too long: {}", a.len());
         assert_ne!(a, b, "truncation must not collide");
-        // And it must be deterministic.
         assert_eq!(a, Value::Text("x".repeat(200)).to_slug());
     }
 

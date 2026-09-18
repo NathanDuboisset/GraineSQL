@@ -126,9 +126,8 @@ pub async fn introspect(db: &Db, cfg: &Config) -> Result<Schema> {
 
     if let Some(missing) = missing {
         // A table the lock knows about but the database no longer has is a
-        // dropped table, which the drift report explains far better than a bare
-        // "does not exist". Anything the lock has never heard of is a typo in
-        // the config, and there is nothing to compare it against.
+        // dropped table, which the drift report explains rather than a bare
+        // "does not exist". Anything the lock never heard of is a config typo.
         let unknown: Vec<TableId> = match &lock {
             Some(lock) => missing
                 .wanted
@@ -222,7 +221,7 @@ pub fn gate_on_drift_with_buckets(
     }
 
     // A per-table `on_drift: ignore` drops the change before anything acts on
-    // it, which is the point: it must not need a blanket --force.
+    // it, so a volatile table needs no blanket --force.
     let policy = drift_policy(ctx)?;
     report.drifts.retain(|d| {
         table_policy(&policy, d, &live.default_schema) != crate::config::OnDrift::Ignore
@@ -317,10 +316,6 @@ fn persist_accepted(ctx: &Ctx, entries: &[(String, String)]) -> Result<()> {
     }
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// sources
-// ---------------------------------------------------------------------------
 
 pub async fn cmd_sources(ctx: &Ctx, no_connect: bool) -> Result<()> {
     let default = ctx.cfg.default_source().ok();
@@ -443,10 +438,6 @@ pub async fn cmd_sources(ctx: &Ctx, no_connect: bool) -> Result<()> {
     }
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// lock / diff
-// ---------------------------------------------------------------------------
 
 pub async fn cmd_lock(ctx: &Ctx, check: bool) -> Result<()> {
     let (_src, db) = ctx.connect(1).await?;
@@ -699,10 +690,6 @@ fn drift_json(report: &drift::Report) -> String {
     .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}"))
 }
 
-// ---------------------------------------------------------------------------
-// export
-// ---------------------------------------------------------------------------
-
 #[allow(clippy::too_many_arguments)]
 pub async fn cmd_export(
     ctx: &Ctx,
@@ -954,10 +941,6 @@ pub async fn cmd_export(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// plan / load
-// ---------------------------------------------------------------------------
-
 /// Read every selected table's rows and build the load plan.
 #[allow(clippy::type_complexity)]
 async fn build_plans(
@@ -1089,8 +1072,7 @@ pub async fn cmd_load(
         return Ok(());
     }
 
-    // A dry run's job is to say what would change, which a row-level diff
-    // answers far better than a row count does.
+    // A dry run says what would change, which a row count cannot.
     if dry_run && !ctx.json {
         let lock = Lock::read(&ctx.cfg.lock_path())?;
         let diffs = data_diff(ctx, &db, &live, &lock, None).await?;
@@ -1380,10 +1362,6 @@ fn confirm_drift(prompt: &str, scope: &str) -> Result<Answer> {
     })
 }
 
-// ---------------------------------------------------------------------------
-// verify
-// ---------------------------------------------------------------------------
-
 pub fn cmd_verify(ctx: &Ctx) -> Result<()> {
     let lock = Lock::read(&ctx.cfg.lock_path())?;
     let out_dir = ctx.cfg.out_dir();
@@ -1519,8 +1497,6 @@ pub fn cmd_verify(ctx: &Ctx) -> Result<()> {
     }
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
 
 pub async fn dispatch(cli: Cli) -> Result<()> {
     // These run before a config exists, so they do not build a Ctx.

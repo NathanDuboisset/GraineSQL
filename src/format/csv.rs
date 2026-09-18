@@ -121,10 +121,6 @@ pub fn decode_field(col: &Column, text: &str, quoted: bool) -> Result<Value> {
     Value::parse(&col.class, Some(text))
 }
 
-// ---------------------------------------------------------------------------
-// Writer
-// ---------------------------------------------------------------------------
-
 pub struct CsvWriter<'a> {
     path: String,
     columns: Vec<&'a Column>,
@@ -162,10 +158,6 @@ impl RowWriter for CsvWriter<'_> {
         })
     }
 }
-
-// ---------------------------------------------------------------------------
-// Reader
-// ---------------------------------------------------------------------------
 
 pub fn read_csv(path: &Path, columns: &[&Column]) -> Result<Vec<Vec<Value>>> {
     let text = std::fs::read_to_string(path)

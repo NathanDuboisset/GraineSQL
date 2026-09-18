@@ -9,10 +9,6 @@ use std::process::Command;
 
 use common::{dirs_differ, graine_bin};
 
-// ---------------------------------------------------------------------------
-// SQLite
-// ---------------------------------------------------------------------------
-
 const SQLITE_SCHEMA: &str = "
 CREATE TABLE orgs (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE);
 CREATE TABLE users (
@@ -320,10 +316,6 @@ fn sqlite_foreign_keys_are_enforced_during_a_load() {
         "exporting users without orgs should be refused:\n{text}"
     );
 }
-
-// ---------------------------------------------------------------------------
-// MySQL
-// ---------------------------------------------------------------------------
 
 macro_rules! require_mysql {
     () => {

@@ -537,7 +537,6 @@ mod tests {
         let json = TypeClass::Json { binary: false };
         assert!(jsonb.widens_to(&json));
         assert!(json.widens_to(&jsonb));
-        // Still not interchangeable with anything else.
         assert!(!jsonb.widens_to(&TypeClass::Int { bits: 64 }));
     }
 

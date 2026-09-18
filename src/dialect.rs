@@ -200,10 +200,6 @@ pub fn for_engine(engine: Engine) -> Option<Box<dyn Dialect>> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Postgres
-// ---------------------------------------------------------------------------
-
 pub struct Postgres;
 
 impl Dialect for Postgres {
@@ -378,10 +374,6 @@ fn pg_quote(s: &str) -> String {
     quote_literal(s)
 }
 
-// ---------------------------------------------------------------------------
-// MySQL
-// ---------------------------------------------------------------------------
-
 pub struct Mysql;
 
 impl Dialect for Mysql {
@@ -549,10 +541,6 @@ impl Dialect for Mysql {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// SQLite
-// ---------------------------------------------------------------------------
 
 pub struct Sqlite;
 
@@ -773,8 +761,6 @@ mod tests {
         col(name, "text", TypeClass::Text { max_len: None })
     }
 
-    // -- identifier quoting -------------------------------------------------
-
     #[test]
     fn postgres_quotes_and_escapes_identifiers() {
         let d = Postgres;
@@ -808,8 +794,6 @@ mod tests {
         let my = Mysql.quote_ident("users`; DROP TABLE users; --");
         assert_eq!(my, "`users``; DROP TABLE users; --`");
     }
-
-    // -- literal escaping ---------------------------------------------------
 
     #[test]
     fn postgres_literals_escape_quotes_and_leave_backslashes_alone() {
@@ -861,8 +845,6 @@ mod tests {
             assert!(my.starts_with('\'') && my.ends_with('\''), "{my}");
         }
     }
-
-    // -- typed literals -----------------------------------------------------
 
     #[test]
     fn postgres_typed_literals() {
@@ -1050,8 +1032,6 @@ mod tests {
         assert_eq!(Mysql.read_expr(&c), "HEX(`z`)");
     }
 
-    // -- read/write expressions --------------------------------------------
-
     #[test]
     fn postgres_reads_and_writes_through_text() {
         let d = Postgres;
@@ -1098,8 +1078,6 @@ mod tests {
         assert_eq!(Postgres.placeholder(12), "$12");
         assert_eq!(Mysql.placeholder(12), "?");
     }
-
-    // -- conflict clauses ---------------------------------------------------
 
     #[test]
     fn postgres_upsert_updates_every_non_key_column() {

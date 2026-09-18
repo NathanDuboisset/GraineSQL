@@ -1,9 +1,8 @@
 //! Collections as tables.
 //!
-//! Two sources of truth, and the difference between them is the whole design:
-//! a `$jsonSchema` validator is a contract the server enforces, so it becomes
-//! real columns and every drift rule applies; an inferred profile is only what
-//! some documents happened to contain, so it is recorded and never fails a load.
+//! A `$jsonSchema` validator is a contract the server enforces, so it becomes
+//! real columns and every drift rule applies. An inferred profile is only what
+//! some documents happened to contain, so it can never fail a load.
 
 use anyhow::Result;
 use bson::{Bson, Document};
@@ -275,8 +274,6 @@ mod tests {
 
     #[test]
     fn profile_derived_columns_claim_nothing() {
-        // Nullable with a default, so no drift rule can classify one as
-        // breaking. A field a sample missed is normal in Mongo.
         let docs = vec![doc! { "_id": 1, "name": "a" }];
         let cols = from_profile(&profile_of(&docs));
         for c in cols.iter().filter(|c| c.name != "_id") {

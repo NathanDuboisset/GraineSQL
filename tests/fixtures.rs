@@ -365,11 +365,8 @@ fn every_fixture_round_trips_on_every_engine_it_declares() {
             continue;
         }
 
-        // Anchor the fixture. Loading the seed files and exporting them again
-        // only proves the two halves agree with each other, so it would pass
-        // just as happily on a file someone had edited. Building the database
-        // from `data.sql` instead ties the committed files to a source GraineSQL
-        // never wrote.
+        // Anchor the fixture: building from `data.sql` ties the committed
+        // files to a source GraineSQL never wrote.
         if let Some(base) = Engine::Postgres.base_url() {
             let run = Run::new(fixture, Engine::Postgres, &base);
             run.exec(&run.url(), &run.data_sql())

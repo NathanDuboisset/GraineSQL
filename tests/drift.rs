@@ -36,10 +36,6 @@ fn an_unchanged_schema_reports_no_drift() {
     f.ok(&["lock", "--check"]);
 }
 
-// ---------------------------------------------------------------------------
-// breaking drift
-// ---------------------------------------------------------------------------
-
 /// Each of these must abort every data command, with the change named.
 const BREAKING: &[(&str, &str, &str)] = &[
     (
@@ -120,21 +116,18 @@ fn breaking_drift_aborts_every_data_command() {
         f.sql_dst(sql)
             .unwrap_or_else(|e| panic!("applying {label:?} to dst: {e}"));
 
-        // diff reports it and exits non-zero.
         let d = f.fail(&["diff"]);
         d.says("breaking");
         d.says(expected);
 
-        // export refuses...
+        // export refuses, and the committed files are untouched.
         let e = f.fail(&["export"]);
         e.says("schema drift");
         e.says("Nothing was changed");
-        // ...and the committed files are untouched, which is the whole point.
         if let Some(diff) = dirs_differ(&before, &f.seed_dir()) {
             panic!("{label}: a refused export modified the seed files:\n{diff}");
         }
 
-        // load refuses too.
         f.fail(&["load", "--source", "dst", "--yes"])
             .says("schema drift");
         assert_eq!(
@@ -185,7 +178,6 @@ fn data_losing_drift_asks_rather_than_aborting() {
         let refused = f.fail(&["export"]);
         refused.says("--yes");
 
-        // And --yes accepts it.
         f.ok(&["export", "--yes", "-q"]);
     }
 }
@@ -216,10 +208,6 @@ fn relocking_accepts_the_change_and_unblocks_the_command() {
     f.ok(&["export", "-q"]);
     f.ok(&["diff"]).says("schema matches");
 }
-
-// ---------------------------------------------------------------------------
-// benign drift
-// ---------------------------------------------------------------------------
 
 const BENIGN: &[(&str, &str, &str)] = &[
     (
@@ -287,7 +275,6 @@ fn benign_drift_warns_and_lets_the_command_through() {
             d.says(expected);
         }
 
-        // Both data commands proceed.
         f.ok(&["export"]);
         f.ok(&["load", "--source", "dst", "--yes", "-q"]);
         assert_eq!(
@@ -320,10 +307,6 @@ fn a_constraint_rename_is_not_drift() {
         .unwrap();
     f.ok(&["diff"]).says("schema matches graine.lock");
 }
-
-// ---------------------------------------------------------------------------
-// row-level checks the schema comparison cannot make
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_null_in_a_now_not_null_column_is_caught_before_writing() {
@@ -442,10 +425,6 @@ fn verify_notices_a_row_count_that_no_longer_matches() {
     std::fs::write(&path, fewer).unwrap();
     f.fail(&["verify"]).says("recorded in graine.lock");
 }
-
-// ---------------------------------------------------------------------------
-// per-table policy and remembered acceptances
-// ---------------------------------------------------------------------------
 
 /// `TABLES`, with `employees` carrying a drift policy.
 fn tables_with_policy(policy: &str) -> String {

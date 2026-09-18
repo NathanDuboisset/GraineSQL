@@ -296,10 +296,6 @@ mod tests {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Reader
-// ---------------------------------------------------------------------------
-
 /// Read back the `INSERT` statements this module writes.
 ///
 /// Not a SQL parser: it accepts the shape [`SqlWriter`] emits and rejects

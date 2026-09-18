@@ -1,10 +1,8 @@
 //! Classifying the difference between the locked schema and the live one.
 //!
-//! The split that matters: *breaking* drift would reject or corrupt data, so it
-//! aborts before anything is touched; *benign* drift cannot, so it warns and
-//! lets the command proceed. Getting a change into the wrong bucket is the worst
-//! failure mode this tool has, a false benign lets a bad load through, a false
-//! breaking blocks work for no reason, so every rule below has a test.
+//! *Breaking* drift would reject or corrupt data, so it aborts before anything
+//! is touched; *benign* drift cannot, so it warns and lets the command proceed.
+//! A wrong bucket is the worst failure this tool has, so every rule has a test.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -217,9 +215,8 @@ pub fn classify(locked: &Schema, live: &Schema) -> Report {
 
 /// Whether a table the live database lacks will simply be created by a load.
 ///
-/// True for a document engine: a collection is not a schema object anyone
-/// migrates, it springs into existence on the first write. Saying "dropped, its
-/// rows will be discarded" there is the opposite of what happens.
+/// True for a document engine: a collection springs into existence on the first
+/// write, so "dropped, its rows will be discarded" is the opposite of the truth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Creatable {
     Yes,
@@ -589,9 +586,8 @@ fn enum_owner(schema: &Schema, name: &str) -> TableId {
 
 /// Compare locked bucket settings against the live ones.
 ///
-/// Buckets are created and configured by migrations, so GraineSQL never writes
-/// these, it only reports when they no longer match what the seed files were
-/// exported against. The question each rule answers is the same as for tables:
+/// Buckets are created and configured by migrations, so these are only ever
+/// reported, never written. Each rule answers the same question as for a table:
 /// would this make the existing objects fail to load?
 pub fn classify_buckets(
     locked: &IndexMap<String, BucketSettings>,
@@ -771,8 +767,6 @@ mod tests {
         assert_eq!(r.render(), "schema matches graine.lock\n");
     }
 
-    // -- breaking -----------------------------------------------------------
-
     #[test]
     fn a_dropped_table_needs_confirmation_rather_than_aborting() {
         // The load still works; it just stops carrying that table's rows.
@@ -787,7 +781,6 @@ mod tests {
 
     #[test]
     fn a_dropped_column_needs_confirmation_rather_than_aborting() {
-        // Its data is discarded, which is a judgement call, not an error.
         let r = drift_from(|s| {
             users(s).columns.retain(|c| c.name != "age");
         });
@@ -997,8 +990,6 @@ mod tests {
         assert!(only(&r).what.contains("generated"));
     }
 
-    // -- benign -------------------------------------------------------------
-
     #[test]
     fn widening_an_integer_is_benign() {
         let r = drift_from(|s| {
@@ -1106,8 +1097,6 @@ mod tests {
         });
         assert_eq!(only(&r).severity, Severity::Benign);
     }
-
-    // -- reporting ----------------------------------------------------------
 
     #[test]
     fn report_groups_by_severity_worst_first_and_counts_each() {

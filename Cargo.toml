@@ -4,11 +4,8 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 authors = ["Nathan Duboisset <nathanduboisset@delosintelligence.fr>"]
-description = "Deterministic, git-friendly database seed export and load for Postgres and MySQL"
-# Not an SPDX identifier, so crates.io needs the file itself. PolyForm
-# Noncommercial is source-available, not open source: commercial use needs a
-# separate licence from the copyright holder.
-license-file = "LICENSE"
+description = "Deterministic, git-friendly database seed export and load for Postgres, MySQL and SQLite"
+license = "MIT"
 repository = "https://github.com/NathanDuboisset/grainesql"
 homepage = "https://github.com/NathanDuboisset/grainesql"
 documentation = "https://docs.rs/grainesql"
